@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { createServer } from 'node:net';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,6 +17,7 @@ import { EventSubWebSocketClient } from '../eventsub-websocket-client.mjs';
 import { RaidEventStore } from '../raid-events.mjs';
 
 const cliExecutable = process.env.THREADBOUND_TWITCH_CLI_EXE;
+const cliAvailable = Boolean(cliExecutable && existsSync(cliExecutable));
 const BROADCASTER_ID = '900000001';
 const SOURCE_ID = '900000002';
 const PRE = [
@@ -124,10 +126,155 @@ function waitForProcessExit(child, timeoutMs = 3_000) {
   return Promise.race([once(child, 'exit').catch(() => {}), delay(timeoutMs)]);
 }
 
-test('production EventSub WebSocket client processes Twitch CLI mock raid without live Twitch or AI', {
-  skip: !cliExecutable ? 'Set THREADBOUND_TWITCH_CLI_EXE to a verified Twitch CLI binary.' : false,
+class InProcessWebSocket {
+  static instances = [];
+
+  constructor(url) {
+    this.url = url;
+    this.readyState = 1;
+    this.listeners = new Map();
+    InProcessWebSocket.instances.push(this);
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  async sendEnvelope(envelope) {
+    const message = { data: JSON.stringify(envelope) };
+    await Promise.all((this.listeners.get('message') || []).map(listener => listener(message)));
+  }
+
+  close() {
+    if (this.readyState >= 2) return;
+    this.readyState = 3;
+    for (const listener of this.listeners.get('close') || []) listener({ code: 1000 });
+  }
+}
+
+async function runInProcessWebSocketFallback() {
+  InProcessWebSocket.instances = [];
+  let now = 20_000;
+  const chatWindows = new ChatContextWindows({ now: () => now });
+  const raidEvents = new RaidEventStore({ now: () => now });
+  for (let index = 0; index < PRE.length; index++) {
+    assert.equal(chatWindows.add({ message: { text: PRE[index] }, chatter_user_id: `fallback-private-${index}` }, `fallback-pre-${index}`), true);
+    now += 10;
+  }
+
+  const welcome = sessionId => ({
+    metadata: { message_type: 'session_welcome' },
+    payload: { session: { id: sessionId, status: 'connected', keepalive_timeout_seconds: 10 } }
+  });
+  const keepalive = {
+    metadata: { message_type: 'session_keepalive' },
+    payload: { session: {} }
+  };
+  const raidNotification = {
+    metadata: { message_type: 'notification', message_id: 'in-process-mock-raid-1' },
+    payload: {
+      subscription: { type: 'channel.raid', version: '1' },
+      event: {
+        from_broadcaster_user_id: SOURCE_ID,
+        from_broadcaster_user_login: 'synthetic_source',
+        from_broadcaster_user_name: 'Synthetic Source',
+        to_broadcaster_user_id: BROADCASTER_ID,
+        to_broadcaster_user_login: 'synthetic_receiver',
+        to_broadcaster_user_name: 'Synthetic Receiver',
+        viewers: 7
+      }
+    }
+  };
+
+  const sessions = [];
+  const keepalives = [];
+  const raidResults = [];
+  const errors = [];
+  const client = new EventSubWebSocketClient({
+    WebSocketCtor: InProcessWebSocket,
+    subscriptionApi: {
+      async onWelcome({ sessionId, payload, resume }) {
+        assert.equal(payload.session.status, 'connected');
+        sessions.push({
+          sessionId,
+          resume,
+          raidRequest: resume ? null : buildRaidSubscriptionRequest(BROADCASTER_ID, sessionId)
+        });
+      }
+    },
+    handlers: {
+      onKeepalive: detail => keepalives.push(detail),
+      onNotification({ envelope }) {
+        raidResults.push(processChannelRaidNotification({
+          envelope,
+          broadcasterId: BROADCASTER_ID,
+          raidEvents,
+          chatWindows,
+          now: () => now
+        }));
+      },
+      onError: error => errors.push(error)
+    }
+  });
+
+  try {
+    client.connect('ws://127.0.0.1/in-process-eventsub-mock');
+    const firstSocket = InProcessWebSocket.instances[0];
+    await firstSocket.sendEnvelope(welcome('in-process-session-1'));
+    assert.deepEqual(sessions[0], {
+      sessionId: 'in-process-session-1',
+      resume: false,
+      raidRequest: {
+        type: 'channel.raid', version: '1',
+        condition: { to_broadcaster_user_id: BROADCASTER_ID },
+        transport: { method: 'websocket', session_id: 'in-process-session-1' }
+      }
+    });
+
+    await firstSocket.sendEnvelope(keepalive);
+    assert.equal(keepalives.length, 1, 'production client dispatches the Welcome-following Keepalive');
+    await firstSocket.sendEnvelope(raidNotification);
+    assert.equal(raidResults[0].accepted, true, 'production client forwards the mock raid to the production raid handler');
+    assert.equal(raidEvents.list().length, 1);
+    assert.equal(raidEvents.list()[0].toBroadcasterId, BROADCASTER_ID);
+    assert.deepEqual(chatWindows.snapshot().pre.map(message => message.text), PRE, 'raid processing freezes the pre-raid window');
+
+    now += 10;
+    assert.equal(chatWindows.add({ message: { text: POST[0] }, chatter_user_name: 'synthetic-viewer' }, 'fallback-post-1'), true);
+    assert.deepEqual(chatWindows.snapshot().post.map(message => message.text), [POST[0]], 'post-raid capture remains available after the mock notification');
+
+    await firstSocket.sendEnvelope({
+      metadata: { message_type: 'session_reconnect' },
+      payload: { session: { reconnect_url: 'ws://127.0.0.1/in-process-eventsub-reconnect' } }
+    });
+    assert.equal(InProcessWebSocket.instances.length, 2, 'reconnect opens a second socket using the supplied URL');
+    const resumedSocket = InProcessWebSocket.instances[1];
+    assert.equal(resumedSocket.url, 'ws://127.0.0.1/in-process-eventsub-reconnect');
+    await resumedSocket.sendEnvelope(welcome('in-process-session-2'));
+    assert.deepEqual(sessions[1], { sessionId: 'in-process-session-2', resume: true, raidRequest: null });
+    assert.equal(firstSocket.readyState, 3, 'the prior socket closes after the resumed Welcome is handled');
+
+    await resumedSocket.sendEnvelope(keepalive);
+    assert.equal(keepalives.length, 2, 'Keepalive is handled on the resumed connection');
+    await resumedSocket.sendEnvelope(raidNotification);
+    assert.equal(raidResults[1].reason, 'duplicate_event', 'a duplicate notification after reconnect is rejected');
+    assert.equal(raidEvents.list().length, 1);
+    assert.deepEqual(errors, []);
+  } finally {
+    client.close();
+  }
+}
+
+test('production EventSub WebSocket client processes a raid through Twitch CLI or local mock fallback', {
   timeout: 60_000
 }, async t => {
+  if (!cliAvailable) {
+    await runInProcessWebSocketFallback();
+    return;
+  }
+
   const tempDirectory = await mkdtemp(join(tmpdir(), 'threadbound-twitch-cli-eventsub-'));
   const configPath = join(tempDirectory, 'empty-twitch-cli-config.env');
   await writeFile(configPath, '', { flag: 'wx' });

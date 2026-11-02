@@ -7,7 +7,7 @@
 - [x] Repository visibility is private.
 - [x] Remote README exists and contains no merge-conflict markers.
 - [x] Expected source and test files are present in the remote tree.
-- [x] Recorded CLI-enabled automated suite: 61 passed, 0 failed, 0 skipped; includes Playwright Chromium against an isolated synthetic fixture and a Twitch CLI mock EventSub WebSocket test of the production client and raid handler. The CLI subscription adapter and OpenAI request are mocked; this is not a live Twitch raid or real OpenAI generation. A later CLI-unavailable run passed 60 and skipped this opt-in test.
+- [x] Latest full automated suite: 61 passed, 0 failed, 0 skipped. The EventSub test uses Twitch CLI's mock WebSocket server when available; otherwise, it sends frames through an in-process WebSocket mock. The fallback does not test the WebSocket wire protocol. Subscription and OpenAI calls are mocked; this is not a live Twitch raid or real OpenAI generation.
 
 ## Required by the official Devpost rules
 
