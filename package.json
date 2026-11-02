@@ -1,0 +1,10 @@
+{
+  "name": "raidbridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "THREADBOUND Twitch raid arrival experience",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test"
+  }
+}

@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0e1118" />
+  <title>THREADBOUND — Arrival desk</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/twitch-status.css" />
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="THREADBOUND home">
+        <span class="brand-mark"><svg viewBox="0 0 36 36" aria-hidden="true"><path d="M6 18h8l4-8 4 16 4-8h4"/><circle cx="6" cy="18" r="2"/><circle cx="30" cy="18" r="2"/></svg></span>
+        <span class="brand-name">THREAD<span>BOUND</span><small>ARRIVAL DESK</small></span>
+      </a>
+      <div class="side-label">WORKSPACE</div>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a class="nav-item active" href="#arrival"><span class="nav-icon">◈</span>Arrival desk<span class="nav-dot"></span></a>
+        <a class="nav-item" href="/overlay.html" target="_blank" rel="noreferrer"><span class="nav-icon">▧</span>OBS overlay</a>
+        <a class="nav-item" href="#how-it-works"><span class="nav-icon">⌁</span>How it works</a>
+      </nav>
+      <div class="sidebar-bottom">
+        <div class="connection-card" id="connection-card"><span class="connection-icon">⌁</span><div><strong id="connection-name">Demo workspace</strong><small id="connection-detail">Not connected to Twitch</small></div><span class="connection-led" id="connection-led"></span></div>
+        <div class="profile-row"><div class="profile-avatar" id="profile-avatar">RB</div><div><strong id="profile-name">Creator preview</strong><small id="profile-detail">Sample workspace</small></div><button class="icon-button" id="disconnect-button" aria-label="Disconnect Twitch" hidden>×</button></div>
+        <div class="version">THREADBOUND <span>EARLY ACCESS</span></div>
+      </div>
+    </aside>
+
+    <main class="main-content" id="arrival">
+      <header class="topbar">
+        <div class="breadcrumbs"><span>Workspace</span><i>/</i><strong>Arrival desk</strong></div>
+        <div class="top-actions"><span class="demo-pill" id="mode-pill"><span></span> DEMO MODE</span><a class="help-button connect-button" id="twitch-connect" href="/auth/twitch" title="Connect Twitch">↗</a></div>
+      </header>
+
+      <div class="page-wrap">
+        <section class="page-heading">
+          <div><div class="eyebrow"><span class="eyebrow-line"></span>THE MOMENT AFTER THE RAID</div><h1>Keep the conversation <em>going.</em></h1><p class="subtitle">Welcome new people in without losing the thread you were already on.</p></div>
+          <a class="overlay-link" href="/overlay.html" target="_blank" rel="noreferrer"><span class="overlay-window-icon">↗</span> Open OBS overlay</a>
+        </section>
+
+        <section class="sample-banner" id="sample-banner" aria-label="Sample data notice"><span class="sample-symbol">✳</span><div><strong id="sample-banner-title">You're exploring with sample data</strong><span id="sample-banner-copy">Stream, chat, and raid details below are illustrative and are not from a connected Twitch channel.</span></div><span class="sample-tag" id="sample-banner-tag">SAMPLE</span></section>
+
+        <section class="integration-health" id="integration-health" aria-label="Twitch integration status" hidden>
+          <div class="health-heading"><span>LIVE CONNECTION</span><span>SERVER CHECK</span></div>
+          <div class="health-items">
+            <div class="health-item"><i id="oauth-health-dot"></i><div><span>TWITCH OAUTH</span><strong id="oauth-health-state">Connected</strong></div></div>
+            <div class="health-item"><i id="eventsub-health-dot"></i><div><span>EVENTSUB WEBSOCKET</span><strong id="eventsub-health-state">Checking</strong></div></div>
+            <div class="health-item"><i id="raid-health-dot"></i><div><span>CHANNEL.RAID</span><strong id="raid-health-state">Checking</strong></div></div>
+            <div class="health-item"><i id="chat-health-dot"></i><div><span>BOUNDED CHAT WINDOW</span><strong id="chat-health-state">Permission needed</strong></div></div>
+          </div>
+          <a id="chat-authorize" class="chat-authorize" href="/auth/twitch?chat=1" hidden>Authorize chat context <span>↗</span></a>
+        </section>
+
+        <div class="workspace-grid">
+          <section class="left-column">
+            <article class="panel raid-panel">
+              <div class="panel-heading"><div><span class="section-kicker">ARRIVAL SIGNAL</span><h2>A raid just came in</h2></div><span class="data-tag"><span class="data-dot"></span> SAMPLE EVENT</span></div>
+              <div class="raid-content sample-raid-only">
+                <div class="raid-avatars"><div class="avatar avatar-raid">M<span>✦</span></div><div class="avatar avatar-you">J</div><div class="raid-arrow">↗</div></div>
+                <div class="raid-copy"><div class="raid-line"><strong>MossyMoth</strong> brought <strong>642 viewers</strong></div><div class="raid-destination">to <span class="channel-dot"></span> JuniperPlays</div><div class="raid-time">Just now <span>·</span> This example raid is not live</div></div>
+                <div class="raid-check"><span>✓</span></div>
+              </div>
+              <div class="stream-context sample-raid-only"><div class="stream-icon">▶</div><div class="stream-text"><span class="context-label">WHAT'S HAPPENING <b>VERIFIED SAMPLE</b></span><strong>Trying to beat the final boss without fast travel</strong><span>Hollow Knight <i>·</i> Sample channel metadata</span></div><span class="live-indicator"><b></b> LIVE</span></div>
+              <div id="live-raid-list" class="live-raid-list" hidden></div>
+            </article>
+
+            <article class="panel conversation-panel sample-only">
+              <div class="panel-heading conversation-heading"><div><span class="section-kicker">CONVERSATION CONTINUITY</span><h2>Pick up where chat left off</h2></div><span class="window-label"><span class="window-indicator"></span> PRE-RAID WINDOW</span></div>
+              <p class="panel-intro">A short look at the conversation before the raid, alongside what's happening now.</p>
+              <div class="topic-card"><div class="topic-icon">✳</div><div class="topic-body"><div class="topic-head"><span class="context-label">MAIN THREAD <b>AI SUMMARY · SAMPLE CHAT</b></span><span class="confidence">CLEAR THREAD</span></div><strong>Can the boss be beaten without fast travel?</strong><p>Juniper is attempting a no-fast-travel run. Chat is comparing charm builds and debating whether the eastern route is worth the extra risk.</p></div></div>
+              <div class="message-flow">
+                <div class="flow-row"><span class="flow-time">BEFORE RAID</span><span class="flow-rule"></span><span class="flow-state">Thread established</span></div>
+                <div class="chat-snippet"><div class="chat-line"><span class="chat-avatar ca-one">T</span><span class="chat-user user-one">tinytalon</span><span>Quick Focus might make that route possible 👀</span></div><div class="chat-line"><span class="chat-avatar ca-two">C</span><span class="chat-user user-two">copperfern</span><span>Are you still avoiding the stag stations?</span></div></div>
+                <div class="flow-row after-flow"><span class="flow-time">AFTER RAID</span><span class="flow-rule"></span><span class="flow-state"><span class="pulse-dot"></span> Conversation continues</span></div>
+                <div class="chat-snippet post-snippet"><div class="chat-line"><span class="chat-avatar ca-three">F</span><span class="chat-user user-three">fern_fable</span><span>We made it to the eastern gate!</span></div></div>
+              </div>
+              <div class="continuity-note"><span class="continuity-glyph">↳</span><span><strong>Same thread, new arrivals.</strong> Sample messages suggest the no-fast-travel challenge is still underway.</span></div>
+            </article>
+          </section>
+
+          <section class="right-column">
+            <article class="panel draft-panel sample-only">
+              <div class="panel-heading draft-heading"><div><span class="section-kicker">ARRIVAL CARD <span class="spark">✳</span></span><h2>Ready for your review</h2></div><span class="review-status"><span></span> NEEDS APPROVAL</span></div>
+              <div class="draft-note"><span class="lock-icon">⌑</span><span>This is a private draft. It won't appear on stream until you approve it.</span></div>
+              <div class="card-preview">
+                <div class="preview-top"><span class="preview-brand"><span class="mini-wave">⌁</span> THREADBOUND</span><span class="preview-sample">SAMPLE</span></div>
+                <div class="preview-raid"><span class="preview-live-dot"></span> RAID ARRIVAL <span class="preview-sep">·</span> 642 VIEWERS</div>
+                <h3>Welcome, MossyMoth crew! 👋</h3>
+                <div class="preview-divider"></div>
+                <div class="preview-section"><span class="preview-icon">▶</span><div><label>RIGHT NOW</label><p>We're taking on Hollow Knight's final boss without using fast travel.</p></div></div>
+                <div class="preview-section"><span class="preview-icon talk-icon">“</span><div><label>THE CHAT THREAD</label><p>Chat's been weighing Quick Focus against the eastern route. The no-stag-station challenge is still on.</p></div></div>
+                <div class="preview-section join-section"><span class="preview-icon join-icon">↗</span><div><label>JUMP IN IF YOU LIKE</label><p>What would you bring for this fight?</p></div></div>
+                <div class="preview-footer"><span><i class="verified-check">✓</i> Stream info from Twitch</span><span><i class="summary-mark">✳</i> Conversation summary</span></div>
+              </div>
+              <div class="draft-edit"><label for="card-edit">MAKE IT YOURS <span>EDIT BEFORE APPROVING</span></label><textarea id="card-edit" rows="3" spellcheck="true">Welcome, MossyMoth crew! We're taking on Hollow Knight's final boss without fast travel. Chat's weighing Quick Focus against the eastern route, and the challenge is still on. What would you bring for this fight?</textarea><div class="edit-meta"><span>✳ AI DRAFT · GROUNDED IN SAMPLE CHAT</span><span id="char-count">0 / 320</span></div></div>
+              <div class="approval-actions"><button class="dismiss-button" id="dismiss-button">Dismiss</button><button class="approve-button" id="approve-button"><span>✓</span> Approve for OBS</button></div>
+              <div class="approval-footnote"><span class="shield-icon">◆</span> Only you decide what appears on stream.</div>
+            </article>
+            <div class="overlay-status-card"><span class="overlay-status-icon">▧</span><div><strong>OBS overlay is waiting</strong><span>Approve this draft to preview it in your scene.</span></div><a href="/overlay.html" target="_blank" rel="noreferrer" aria-label="Open overlay">↗</a></div>
+          </section>
+        </div>
+        <footer class="footer-note" id="how-it-works"><span>✳</span> New arrivals deserve context. Your conversation deserves to continue.</footer>
+      </div>
+    </main>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
