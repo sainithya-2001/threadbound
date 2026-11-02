@@ -36,6 +36,14 @@ test('deduplicates message and raid IDs and ignores empty messages', () => {
   assert.equal(windows.stats().preCount, 1);
 });
 
+test('bounds each raw in-memory chat message while discarding chatter identity fields', () => {
+  const windows = new ChatContextWindows({ now: () => 1000 });
+  assert.equal(windows.add({ message: { text: 'x'.repeat(700) }, chatter_user_name: 'private-name', chatter_user_id: 'private-id' }, 'long-message'), true);
+  const snapshot = windows.pre.map(message => message.text);
+  assert.equal(snapshot[0].length, 500);
+  assert.equal(JSON.stringify(snapshot).includes('private'), false);
+});
+
 test('pre and post buffers are capped by message count and expire on their windows', () => {
   let now = 1000;
   const windows = new ChatContextWindows({ preWindowMs: 50, postWindowMs: 30, maxMessages: 2, now: () => now });

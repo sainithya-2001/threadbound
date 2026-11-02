@@ -17,7 +17,7 @@ export class ChatContextWindows {
     const now = this.now();
     this.prune(now);
     if (typeof messageId !== 'string' || !messageId || this.seenIds.has(messageId)) return false;
-    const text = typeof event?.message?.text === 'string' ? event.message.text.trim() : '';
+    const text = typeof event?.message?.text === 'string' ? event.message.text.trim().slice(0, 500) : '';
     if (!text) return false;
     this.seenIds.set(messageId, now + Math.max(this.preWindowMs, this.postWindowMs) + 60_000);
     while (this.seenIds.size > this.maxMessages * 4) this.seenIds.delete(this.seenIds.keys().next().value);

@@ -7,6 +7,7 @@
   <title>THREADBOUND — Arrival desk</title>
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/twitch-status.css" />
+  <link rel="stylesheet" href="/context-intelligence.css" />
   <script src="/app.js" defer></script>
 </head>
 <body>
@@ -42,6 +43,18 @@
         </section>
 
         <section class="sample-banner" id="sample-banner" aria-label="Sample data notice"><span class="sample-symbol">✳</span><div><strong id="sample-banner-title">You're exploring with sample data</strong><span id="sample-banner-copy">Stream, chat, and raid details below are illustrative and are not from a connected Twitch channel.</span></div><span class="sample-tag" id="sample-banner-tag">SAMPLE</span></section>
+
+        <section class="ai-consent-panel" aria-labelledby="ai-consent-title">
+          <div class="ai-consent-copy">
+            <div class="ai-consent-heading"><span class="ai-consent-symbol">◈</span><div><span class="section-kicker">PRIVACY &amp; AI ANALYSIS</span><h2 id="ai-consent-title">Your chat stays here unless you opt in.</h2></div></div>
+            <p>Off by default. When enabled, THREADBOUND sends only message text from the five-minute pre-raid and three-minute post-raid windows (up to 160 messages per window, 500 characters per message) to OpenAI for conversation analysis. Twitch chatter names, IDs, badges, and other identity fields are discarded before the request. THREADBOUND keeps raw chat in memory only and does not store it in SQLite. OpenAI processes the submitted text; turning consent off blocks future requests and cancels a pending request where possible, but cannot recall content already sent.</p>
+            <small>Twitch raid detection and bounded chat capture can keep working while AI analysis is off. Turn consent on before a raid to create a context draft.</small>
+          </div>
+          <div class="ai-consent-control">
+            <label class="consent-toggle-label" for="ai-consent-toggle"><input id="ai-consent-toggle" type="checkbox" role="switch" aria-checked="false" aria-describedby="ai-consent-state"><span class="consent-switch-track"><i></i></span><span>Allow OpenAI analysis of bounded chat</span></label>
+            <div class="ai-consent-state" id="ai-consent-state" aria-live="polite"><strong id="ai-consent-status">OFF · NO CHAT SENT TO OPENAI</strong><span id="ai-consent-detail">Twitch chat capture is independent. No chat content will be sent for AI analysis.</span></div>
+          </div>
+        </section>
 
         <section class="integration-health" id="integration-health" aria-label="Twitch integration status" hidden>
           <div class="health-heading"><span>LIVE CONNECTION</span><span>SERVER CHECK</span></div>
@@ -98,6 +111,18 @@
               <div class="draft-edit"><label for="card-edit">MAKE IT YOURS <span>EDIT BEFORE APPROVING</span></label><textarea id="card-edit" rows="3" spellcheck="true">Welcome, MossyMoth crew! We're taking on Hollow Knight's final boss without fast travel. Chat's weighing Quick Focus against the eastern route, and the challenge is still on. What would you bring for this fight?</textarea><div class="edit-meta"><span>✳ AI DRAFT · GROUNDED IN SAMPLE CHAT</span><span id="char-count">0 / 320</span></div></div>
               <div class="approval-actions"><button class="dismiss-button" id="dismiss-button">Dismiss</button><button class="approve-button" id="approve-button"><span>✓</span> Approve for OBS</button></div>
               <div class="approval-footnote"><span class="shield-icon">◆</span> Only you decide what appears on stream.</div>
+            </article>
+            <article class="panel live-context-panel" id="live-context-panel" hidden>
+              <div class="panel-heading draft-heading"><div><span class="section-kicker">CONVERSATION BRIDGE <span class="spark">✳</span></span><h2 id="live-context-title">Listening for the thread</h2></div><span class="context-state" id="live-context-state">WAITING</span></div>
+              <div class="verified-raid-facts" id="verified-raid-facts" hidden><span class="verified-facts-mark">✓</span><div><label>VERIFIED EVENT · TWITCH EVENTSUB</label><p id="verified-raid-copy"></p><small id="verified-raid-time"></small></div></div>
+              <div class="context-message" id="live-context-message" role="status" aria-live="polite">Waiting for a real Twitch raid. No summary will be created from sample data.</div>
+              <div id="live-context-draft" hidden>
+                <div class="context-ai-heading"><span>✳</span><div><label>AI-GENERATED CHAT SUMMARY</label><small>Based on bounded pre-raid and post-raid messages · review before use</small></div></div>
+                <div class="context-claims" id="live-context-claims"></div>
+                <div class="draft-edit live-draft-edit"><label for="live-card-edit">MAKE IT YOURS <span>EDIT BEFORE APPROVING</span></label><textarea id="live-card-edit" rows="7" maxlength="1000" spellcheck="true" aria-label="Edit the generated conversation context card"></textarea><div class="edit-meta"><span>✳ GROUNDED IN CHAT · NO VIEWER DETAILS</span><span id="live-card-char-count">0 / 1000</span></div></div>
+                <div class="approval-actions"><button class="dismiss-button" id="live-dismiss-button">Dismiss</button><button class="approve-button" id="live-approve-button"><span>✓</span> Approve for OBS</button></div>
+                <div class="approval-footnote"><span class="shield-icon">◆</span> Only streamer-approved text reaches the OBS browser source.</div>
+              </div>
             </article>
             <div class="overlay-status-card"><span class="overlay-status-icon">▧</span><div><strong>OBS overlay is waiting</strong><span>Approve this draft to preview it in your scene.</span></div><a href="/overlay.html" target="_blank" rel="noreferrer" aria-label="Open overlay">↗</a></div>
           </section>

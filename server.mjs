@@ -10,13 +10,27 @@ import { RaidEventStore } from './raid-events.mjs';
 import { verifyOAuthState } from './oauth-state.mjs';
 import { assessRaidSubscription, buildRaidSubscriptionRequest, getEventSubSessionId } from './eventsub-utils.mjs';
 import { assessChatMessageSubscription, buildChatMessageSubscriptionRequest, ChatContextWindows, hasChatReadPermission } from './chat-context.mjs';
+import { assessConversationReadiness, ConversationIntelligenceError, createRaidGenerationSchedule, generateConversationIntelligence } from './conversation-intelligence.mjs';
+import { ContextCardStore } from './context-cards.mjs';
 
 try { process.loadEnvFile(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
+function parseDemoMode(value) {
+  if (value === undefined) return false;
+  if (typeof value !== 'string') throw new Error('DEMO_MODE must be true or false.');
+  const normalized = value.trim().toLowerCase();
+  if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+  if (['false', '0', 'no', 'off'].includes(normalized)) return false;
+  throw new Error('DEMO_MODE must be explicitly true or false; refusing to start with ambiguous mode.');
+}
+
 const root = fileURLToPath(new URL('.', import.meta.url));
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
-const CLIENT_ID = process.env.TWITCH_CLIENT_ID;
-const CLIENT_SECRET = process.env.TWITCH_CLIENT_SECRET;
+const DEMO_MODE = parseDemoMode(process.env.DEMO_MODE);
+// Explicit demo mode ignores credentials loaded from .env before any live
+// integration objects or token storage are initialized.
+const CLIENT_ID = DEMO_MODE ? '' : process.env.TWITCH_CLIENT_ID;
+const CLIENT_SECRET = DEMO_MODE ? '' : process.env.TWITCH_CLIENT_SECRET;
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = Number(process.env.PORT || 4173);
 const configuredRedirect = process.env.TWITCH_REDIRECT_URI;
@@ -25,6 +39,18 @@ const APP_BASE_URL = new URL(process.env.APP_BASE_URL || inferredBase);
 if (!['http:', 'https:'].includes(APP_BASE_URL.protocol)) throw new Error('APP_BASE_URL must use http or https.');
 const REDIRECT_URI = `${APP_BASE_URL.origin}/auth/twitch/callback`;
 const CHAT_SCOPE = 'user:read:chat';
+const OPENAI_API_KEY = DEMO_MODE ? '' : process.env.OPENAI_API_KEY;
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-6-luna';
+const EMPTY_CHAT_WINDOW = Object.freeze({ preCount: 0, postCount: 0, activeRaidWindow: false, postWindowOpen: false });
+const DEMO_SAMPLE_DATA = Object.freeze({
+  source: 'sample',
+  label: 'ILLUSTRATIVE SAMPLE DATA · NOT FROM TWITCH',
+  stream: Object.freeze({ title: 'Trying to beat the final boss without fast travel', game: 'Hollow Knight' }),
+  conversation: Object.freeze({
+    topic: 'Can the boss be beaten without fast travel?',
+    summary: 'Sample context describes an illustrative no-fast-travel challenge and route discussion.'
+  })
+});
 
 // OAuth tokens are encrypted in SQLite and are only used server-side.
 let twitch = null;
@@ -43,8 +69,9 @@ let status = 'demo';
 let reauthorizationRequired = false;
 let tokenStore = null;
 let tokenStoreReady = false;
+let aiAnalysisConsentEnabled = false;
 try {
-  if (CLIENT_ID && CLIENT_SECRET) {
+  if (!DEMO_MODE && CLIENT_ID && CLIENT_SECRET) {
     const databasePath = process.env.THREADBOUND_TOKEN_DB || join(root, 'data', 'threadbound.sqlite');
     tokenStore = new EncryptedTokenStore({ databasePath, encryptionKey: process.env.THREADBOUND_ENCRYPTION_KEY });
     tokenStoreReady = true;
@@ -54,7 +81,10 @@ try {
 }
 const raidEvents = new RaidEventStore();
 const chatWindows = new ChatContextWindows();
+const contextCards = new ContextCardStore();
 const oauthStates = new Map();
+let cancelContextSchedule = null;
+let contextGenerationController = null;
 
 function json(res, code, value) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -68,7 +98,30 @@ function setCookie(res, value, maxAge = 600) {
   res.setHeader('Set-Cookie', `rb_oauth=${value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${maxAge}${secure}`);
 }
 function publicState() {
+  if (DEMO_MODE) {
+    return {
+      demoMode: true,
+      dataMode: 'sample',
+      sampleData: DEMO_SAMPLE_DATA,
+      configured: false,
+      tokenStorageReady: false,
+      oauthCanStart: false,
+      connected: false,
+      reauthorizationRequired: false,
+      status: 'demo',
+      broadcaster: null,
+      eventSub: { connected: false, status: 'disabled_demo_mode' },
+      raidSubscription: { status: 'disabled_demo_mode', enabled: false, broadcasterMatches: false, verifiedAt: null, error: null },
+      chat: { status: 'disabled_demo_mode', authorized: false, subscriptionEnabled: false, collectionActive: false, window: EMPTY_CHAT_WINDOW },
+      aiConsent: { enabled: false, locked: true },
+      context: { status: 'idle', message: 'Demo mode is isolated. Sample content is illustrative; no live chat or AI draft is available.', raidFacts: null, draft: null },
+      raids: []
+    };
+  }
   return {
+    demoMode: false,
+    dataMode: twitch ? 'live' : 'unconfigured',
+    sampleData: null,
     configured: Boolean(CLIENT_ID && CLIENT_SECRET),
     tokenStorageReady: tokenStoreReady,
     oauthCanStart: Boolean(CLIENT_ID),
@@ -84,10 +137,125 @@ function publicState() {
       collectionActive: Boolean(hasChatReadPermission(twitch?.scopes) && chatSubscriptionState.enabled && eventSubConnectionState === 'connected'),
       window: chatWindows.stats()
     },
+    aiConsent: { enabled: aiAnalysisConsentEnabled },
+    context: contextCards.dashboardView(),
     raids: raidEvents.list()
   };
 }
+
+function clearContextWork() {
+  cancelContextSchedule?.();
+  cancelContextSchedule = null;
+  contextGenerationController?.abort();
+  contextGenerationController = null;
+}
+
+function setAIAnalysisConsent(enabled) {
+  if (DEMO_MODE) {
+    aiAnalysisConsentEnabled = false;
+    return false;
+  }
+  aiAnalysisConsentEnabled = enabled;
+  const raidId = contextCards.currentRaidId();
+  if (!enabled && contextGenerationController) {
+    contextGenerationController.abort();
+    contextGenerationController = null;
+    if (raidId && contextCards.dashboardView().status === 'generating') {
+      contextCards.setStatus(raidId, 'consent_required', 'AI analysis was turned off. Any pending request was cancelled where possible; content already sent to OpenAI cannot be recalled. No new request will be sent unless consent is turned on again.');
+    }
+  } else if (enabled && raidId && contextCards.dashboardView().status === 'consent_required') {
+    contextCards.setStatus(raidId, 'consent_enabled', 'AI analysis is enabled for future raids. The previous raid will not be submitted retroactively.');
+  }
+  return true;
+}
+
+function sanitizeChatWindow(messages) {
+  return messages.map((message, messageIndex) => ({ messageIndex, text: message.text.slice(0, 500) }));
+}
+
+function startContextGeneration(raidId, trigger) {
+  if (DEMO_MODE) return;
+  if (contextCards.currentRaidId() !== raidId) return;
+  cancelContextSchedule = null;
+  if (!aiAnalysisConsentEnabled) {
+    contextCards.setStatus(raidId, 'consent_required', 'AI analysis is off. Bounded chat remains on this server and no content was sent to OpenAI. Turn on consent before the next raid to generate a draft.');
+    return;
+  }
+  const snapshot = chatWindows.snapshot();
+  const preMessages = sanitizeChatWindow(snapshot?.pre || []);
+  const postMessages = sanitizeChatWindow(snapshot?.post || []);
+  const readiness = assessConversationReadiness({
+    chatAuthorized: Boolean(twitch && hasChatReadPermission(twitch.scopes)),
+    subscriptionEnabled: Boolean(chatSubscriptionState.enabled),
+    preMessageCount: preMessages.length,
+    postMessageCount: postMessages.length,
+    openAIConfigured: Boolean(OPENAI_API_KEY)
+  });
+  if (readiness === 'unavailable') {
+    contextCards.setStatus(raidId, 'unavailable', 'Chat permission is not active. This raid needs a manual welcome; no conversation summary was generated.');
+    return;
+  }
+  if (readiness === 'insufficient') {
+    if (!snapshot) {
+      contextCards.setStatus(raidId, 'insufficient', 'No bounded chat messages remain for this raid, so THREADBOUND will not guess.');
+      return;
+    }
+    contextCards.setStatus(raidId, 'insufficient', `There was not enough chat in both windows to make a reliable bridge (${preMessages.length} before, ${postMessages.length} after).`);
+    return;
+  }
+  if (readiness === 'unconfigured') {
+    contextCards.setStatus(raidId, 'error', 'OpenAI is not configured. Add OPENAI_API_KEY to the local .env file to generate context.');
+    return;
+  }
+  contextCards.setStatus(raidId, 'generating', `Comparing the pre-raid and post-raid conversation (${trigger === 'early' ? '15-second check' : '45-second deadline'}).`);
+  const controller = new AbortController();
+  contextGenerationController = controller;
+  void generateConversationIntelligence({
+    preMessages, postMessages, apiKey: OPENAI_API_KEY, model: OPENAI_MODEL, signal: controller.signal,
+    consentEnabled: true, isConsentEnabled: () => aiAnalysisConsentEnabled
+  })
+    .then(result => {
+      if (controller.signal.aborted || contextCards.currentRaidId() !== raidId) return;
+      if (result.status === 'insufficient') {
+        contextCards.setStatus(raidId, 'insufficient', 'The captured messages did not support a reliable bridge. Nothing was drafted.');
+        return;
+      }
+      const draftId = contextCards.createDraft(raidId, result);
+      if (!draftId) return;
+      console.log(`Conversation draft ready for review; raid=${raidId}; pre_messages=${preMessages.length}; post_messages=${postMessages.length}`);
+    })
+    .catch(error => {
+      if (controller.signal.aborted || contextCards.currentRaidId() !== raidId) return;
+      const kind = error instanceof ConversationIntelligenceError ? error.kind : 'api_error';
+      const message = kind === 'unconfigured'
+        ? 'OpenAI is not configured. Add OPENAI_API_KEY to the local .env file to generate context.'
+        : kind === 'timeout'
+          ? 'OpenAI took too long. This raid’s draft was not generated.'
+          : kind === 'validation_error'
+            ? 'The generated evidence failed validation. The whole draft was discarded.'
+            : 'OpenAI could not generate a context card. This raid’s conversation remains private.';
+      contextCards.setStatus(raidId, 'error', message);
+      console.warn(`Conversation generation ended without a draft (${kind}).`);
+    })
+    .finally(() => { if (contextGenerationController === controller) contextGenerationController = null; });
+}
+
+function beginContextContinuity(raidId, event, receivedAt) {
+  if (DEMO_MODE) return;
+  clearContextWork();
+  contextCards.beginRaid(raidId, {
+    sourceChannel: event.from_broadcaster_user_name || event.from_broadcaster_user_login || 'Unknown channel',
+    destinationChannel: event.to_broadcaster_user_name || twitch?.user.display_name || 'Connected channel',
+    viewerCount: Number.isInteger(event.viewers) ? event.viewers : null,
+    receivedAt: new Date(receivedAt).toISOString()
+  });
+  cancelContextSchedule = createRaidGenerationSchedule({
+    getPostMessageCount: () => chatWindows.snapshot()?.post.length || 0,
+    generate: trigger => { queueMicrotask(() => startContextGeneration(raidId, trigger)); }
+  });
+}
 async function twitchRequest(path, token = twitch?.accessToken, init = {}) {
+  if (DEMO_MODE) throw new Error('Twitch API access is disabled in demo mode.');
   const response = await fetch(`https://api.twitch.tv/helix/${path}`, {
     ...init,
     headers: { 'Client-Id': CLIENT_ID, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...init.headers }
@@ -101,6 +269,7 @@ async function twitchRequest(path, token = twitch?.accessToken, init = {}) {
   return body;
 }
 async function validateToken(accessToken) {
+  if (DEMO_MODE) throw new Error('Twitch OAuth is disabled in demo mode.');
   const response = await fetch('https://id.twitch.tv/oauth2/validate', { headers: { Authorization: `OAuth ${accessToken}` } });
   if (!response.ok) throw new Error('Twitch returned an invalid access token. Please reconnect.');
   const value = await response.json();
@@ -108,6 +277,7 @@ async function validateToken(accessToken) {
   return value;
 }
 async function createRaidSubscription(sessionId) {
+  if (DEMO_MODE) throw new Error('Twitch EventSub is disabled in demo mode.');
   if (!sessionId) throw new Error('EventSub Welcome message did not include a session ID.');
   raidSubscriptionState = { status: 'creating', enabled: false, broadcasterMatches: false, verifiedAt: null, error: null };
   const created = await twitchRequest('eventsub/subscriptions', twitch.accessToken, {
@@ -121,6 +291,7 @@ async function createRaidSubscription(sessionId) {
   await verifyRaidSubscription(sessionId);
 }
 async function verifyRaidSubscription(sessionId = eventSubSessionId) {
+  if (DEMO_MODE) return;
   if (!twitch || !sessionId) return;
   const result = await twitchRequest('eventsub/subscriptions?type=channel.raid');
   const assessed = assessRaidSubscription(result.data || [], twitch.user.id, sessionId);
@@ -138,6 +309,7 @@ async function verifyRaidSubscription(sessionId = eventSubSessionId) {
   if (!assessed.enabled) throw new Error(`Twitch reports channel.raid subscription status: ${assessed.subscription.status}.`);
 }
 async function ensureChatSubscription(sessionId = eventSubSessionId) {
+  if (DEMO_MODE) return;
   if (!twitch) return;
   if (!hasChatReadPermission(twitch.scopes)) {
     chatSubscriptionState = { status: 'permission_required', enabled: false, broadcasterMatches: false, sessionMatches: false, verifiedAt: null, error: null };
@@ -180,6 +352,7 @@ async function ensureChatSubscription(sessionId = eventSubSessionId) {
   }
 }
 function scheduleTokenRefresh(delayOverride) {
+  if (DEMO_MODE) return;
   clearTimeout(tokenRefreshTimer);
   if (!twitch) return;
   tokenRefreshTimer = setTimeout(async () => {
@@ -204,6 +377,7 @@ function scheduleTokenRefresh(delayOverride) {
   tokenRefreshTimer.unref?.();
 }
 function scheduleReconnect(delay = 1500) {
+  if (DEMO_MODE) return;
   clearTimeout(reconnectTimer);
   if (!twitch) return;
   reconnectTimer = setTimeout(() => connectEventSub(), delay);
@@ -218,6 +392,7 @@ function armKeepalive(timeoutSeconds) {
   sessionKeepaliveTimer.unref?.();
 }
 function connectEventSub(url = 'wss://eventsub.wss.twitch.tv/ws', resume = false) {
+  if (DEMO_MODE) return;
   if (!twitch) return;
   const generation = ++eventGeneration;
   resumeSubscriptions = resume;
@@ -260,7 +435,10 @@ function connectEventSub(url = 'wss://eventsub.wss.twitch.tv/ws', resume = false
     } else if (type === 'notification' && payload.subscription?.type === 'channel.raid') {
       const eventId = envelope.metadata?.message_id || randomBytes(12).toString('hex');
       const event = payload.event || {};
-      if (raidEvents.add(event, eventId) && event.to_broadcaster_user_id === twitch?.user.id) chatWindows.beginRaid(eventId);
+      const receivedAt = Date.now();
+      if (raidEvents.add(event, eventId) && event.to_broadcaster_user_id === twitch?.user.id && chatWindows.beginRaid(eventId, receivedAt)) {
+        beginContextContinuity(eventId, event, receivedAt);
+      }
     } else if (type === 'notification' && payload.subscription?.type === 'channel.chat.message') {
       if (chatSubscriptionState.enabled && payload.event?.broadcaster_user_id === twitch?.user.id) {
         chatWindows.add(payload.event, payload.event?.message_id || envelope.metadata?.message_id);
@@ -295,6 +473,7 @@ function connectEventSub(url = 'wss://eventsub.wss.twitch.tv/ws', resume = false
   });
 }
 function disconnect({ clearPersisted = false } = {}) {
+  clearContextWork();
   twitch = null;
   status = 'demo';
   eventSubConnectionState = 'disconnected';
@@ -306,6 +485,7 @@ function disconnect({ clearPersisted = false } = {}) {
   eventSocket = null;
   raidEvents.clear();
   chatWindows.clear();
+  contextCards.clear();
   chatSubscriptionState = { status: 'permission_required', enabled: false, broadcasterMatches: false, sessionMatches: false, verifiedAt: null, error: null };
   if (clearPersisted) {
     try { tokenStore?.clear(); } catch { console.error('Could not clear the encrypted Twitch session store.'); }
@@ -315,12 +495,59 @@ function htmlMessage(title, message) {
   return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title}</title><body style="background:#101319;color:#edece8;font:16px system-ui;padding:48px"><h1>${title}</h1><p>${message}</p><p><a style="color:#b7f288" href="${APP_BASE_URL.origin}/auth/twitch">Try Twitch connection again</a></p><p><a style="color:#b7f288" href="${APP_BASE_URL.origin}/">Return to THREADBOUND</a></p></body>`;
 }
 
+async function readJsonBody(req, maxBytes = 4096) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error('Request body too large.'), { statusCode: 413 });
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch { throw Object.assign(new Error('Invalid JSON request.'), { statusCode: 400 }); }
+}
+
+function sameOriginRequest(req) {
+  if (!req.headers.origin) return false;
+  try {
+    const origin = new URL(req.headers.origin);
+    const requestOrigin = `${APP_BASE_URL.protocol}//${req.headers.host || ''}`;
+    return origin.origin === APP_BASE_URL.origin || origin.origin === requestOrigin;
+  }
+  catch { return false; }
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname === '/api/twitch/status' && req.method === 'GET') return json(res, 200, publicState());
-    if (url.pathname === '/api/twitch/disconnect' && req.method === 'POST') { disconnect({ clearPersisted: true }); reauthorizationRequired = false; return json(res, 200, publicState()); }
+    if (url.pathname === '/api/context/consent' && req.method === 'POST') {
+      if (!sameOriginRequest(req)) return json(res, 403, { error: 'Consent settings must be changed from this THREADBOUND origin.' });
+      const body = await readJsonBody(req, 1024);
+      if (typeof body?.enabled !== 'boolean') return json(res, 400, { error: 'Consent enabled must be true or false.' });
+      if (DEMO_MODE && body.enabled) return json(res, 409, { enabled: false, locked: true, error: 'AI analysis cannot be enabled in demo mode.' });
+      setAIAnalysisConsent(body.enabled);
+      return json(res, 200, { enabled: aiAnalysisConsentEnabled, ...(DEMO_MODE ? { locked: true } : {}) });
+    }
+    if (url.pathname === '/api/context/approved' && req.method === 'GET') return json(res, 200, contextCards.approvedView());
+    if (url.pathname === '/api/context/approve' && req.method === 'POST') {
+      if (!sameOriginRequest(req)) return json(res, 403, { error: 'Approval requests must come from this THREADBOUND origin.' });
+      if (!twitch) return json(res, 409, { error: 'Connect Twitch before approving a live context card.' });
+      const body = await readJsonBody(req);
+      if (!contextCards.approve(body?.draftId, body?.text)) return json(res, 409, { error: 'This draft is no longer available or the edited card is invalid.' });
+      return json(res, 200, { approved: true, context: contextCards.dashboardView() });
+    }
+    if (url.pathname === '/api/context/dismiss' && req.method === 'POST') {
+      if (!sameOriginRequest(req)) return json(res, 403, { error: 'Dismiss requests must come from this THREADBOUND origin.' });
+      if (!contextCards.dismiss((await readJsonBody(req))?.draftId)) return json(res, 409, { error: 'This draft is no longer available.' });
+      return json(res, 200, { dismissed: true, approved: false, context: contextCards.dashboardView() });
+    }
+    if (url.pathname === '/api/twitch/disconnect' && req.method === 'POST') {
+      if (DEMO_MODE) return json(res, 409, { error: 'Twitch connection management is disabled in demo mode.' });
+      disconnect({ clearPersisted: true }); reauthorizationRequired = false; return json(res, 200, publicState());
+    }
     if (url.pathname === '/auth/twitch' && req.method === 'GET') {
+      if (DEMO_MODE) return json(res, 404, { error: 'Twitch OAuth is disabled in demo mode.' });
       if (!CLIENT_ID) return json(res, 503, { error: 'Add TWITCH_CLIENT_ID to the server environment first.' });
       if (CLIENT_SECRET && !tokenStoreReady) return json(res, 503, { error: 'Encrypted token storage is unavailable. Configure THREADBOUND_ENCRYPTION_KEY and restart THREADBOUND.' });
       if (url.origin !== APP_BASE_URL.origin) {
@@ -335,6 +562,7 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(302, { Location: authorize.toString(), 'Cache-Control': 'no-store' }); return res.end();
     }
     if (url.pathname === '/auth/twitch/callback' && req.method === 'GET') {
+      if (DEMO_MODE) return json(res, 404, { error: 'Twitch OAuth is disabled in demo mode.' });
       const state = url.searchParams.get('state') || '';
       const expires = oauthStates.get(state);
       oauthStates.delete(state);
@@ -389,13 +617,13 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(body);
   } catch (error) {
-    const code = error.code === 'ENOENT' ? 404 : 500;
+    const code = error.statusCode || (error.code === 'ENOENT' ? 404 : 500);
     res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(code === 404 ? 'Not found' : 'Server error');
   }
 });
 
 async function restorePersistedSession() {
-  if (!tokenStoreReady) return;
+  if (DEMO_MODE || !tokenStoreReady) return;
   let saved;
   try { saved = tokenStore.load(); }
   catch {
@@ -452,8 +680,9 @@ async function restorePersistedSession() {
 
 server.listen(PORT, HOST, () => {
   console.log(`THREADBOUND listening on ${HOST}:${PORT}`);
-  if (CLIENT_ID && CLIENT_SECRET) console.log(`Twitch OAuth configured; redirect URI: ${REDIRECT_URI}`);
+  if (DEMO_MODE) console.log('DEMO_MODE=true; Twitch OAuth, token storage, EventSub, chat, and OpenAI are disabled. Only labeled sample data is available.');
+  else if (CLIENT_ID && CLIENT_SECRET) console.log(`Twitch OAuth configured; redirect URI: ${REDIRECT_URI}`);
   else if (CLIENT_ID) console.log('Twitch authorization can start; add the Client Secret locally to complete token exchange.');
   else console.log('Twitch app Client ID not configured; demo mode is available.');
-  if (tokenStoreReady) void restorePersistedSession();
+  if (!DEMO_MODE && tokenStoreReady) void restorePersistedSession();
 });
