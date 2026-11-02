@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import process from 'node:process';
@@ -29,18 +29,39 @@ function parseDemoMode(value) {
 
 const root = fileURLToPath(new URL('.', import.meta.url));
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
+const PUBLIC_ASSETS = new Map([
+  ['/', 'index.html'],
+  ['/index.html', 'index.html'],
+  ['/overlay.html', 'overlay.html'],
+  ['/styles.css', 'styles.css'],
+  ['/twitch-status.css', 'twitch-status.css'],
+  ['/context-intelligence.css', 'context-intelligence.css'],
+  ['/app.js', 'app.js'],
+  ['/overlay.js', 'overlay.js']
+]);
 const DEMO_MODE = parseDemoMode(process.env.DEMO_MODE);
 // Explicit demo mode ignores credentials loaded from .env before any live
 // integration objects or token storage are initialized.
 const CLIENT_ID = DEMO_MODE ? '' : process.env.TWITCH_CLIENT_ID;
 const CLIENT_SECRET = DEMO_MODE ? '' : process.env.TWITCH_CLIENT_SECRET;
-const HOST = process.env.HOST || '0.0.0.0';
+export const SERVER_HOST = process.env.HOST || '127.0.0.1';
+const HOST = SERVER_HOST;
 const PORT = Number(process.env.PORT || 4173);
 const configuredRedirect = process.env.TWITCH_REDIRECT_URI;
 const inferredBase = configuredRedirect ? new URL(configuredRedirect).origin : `http://localhost:${PORT}`;
 const APP_BASE_URL = new URL(process.env.APP_BASE_URL || inferredBase);
 if (!['http:', 'https:'].includes(APP_BASE_URL.protocol)) throw new Error('APP_BASE_URL must use http or https.');
 const REDIRECT_URI = `${APP_BASE_URL.origin}/auth/twitch/callback`;
+const localHosts = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
+const appBasePort = Number(APP_BASE_URL.port || (APP_BASE_URL.protocol === 'https:' ? 443 : 80));
+if (localHosts.has(APP_BASE_URL.hostname.toLowerCase()) && appBasePort !== PORT) {
+  throw new Error('Local APP_BASE_URL port must match PORT. Check for a stale inherited APP_BASE_URL or PORT value.');
+}
+if (configuredRedirect) {
+  const configuredUrl = new URL(configuredRedirect);
+  const callbackMatches = configuredUrl.origin === APP_BASE_URL.origin && configuredUrl.pathname === '/auth/twitch/callback' && !configuredUrl.search && !configuredUrl.hash;
+  if (!callbackMatches) throw new Error('TWITCH_REDIRECT_URI must match APP_BASE_URL/auth/twitch/callback.');
+}
 const CHAT_SCOPE = 'user:read:chat';
 const OPENAI_API_KEY = DEMO_MODE ? '' : process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-6-luna';
@@ -520,7 +541,7 @@ function sameOriginRequest(req) {
   catch { return false; }
 }
 
-export async function handleRequest(req, res) {
+export async function handleRequest(req, res, { assetRoot = root } = {}) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname === '/api/twitch/status' && req.method === 'GET') return json(res, 200, publicState());
@@ -613,9 +634,12 @@ export async function handleRequest(req, res) {
         res.writeHead(502, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' }); return res.end(htmlMessage('Twitch connection failed', 'The Twitch API could not complete the connection. Check the server terminal and try again.'));
       }
     }
-    const pathname = decodeURIComponent(url.pathname);
-    const file = normalize(join(root, pathname === '/' ? 'index.html' : pathname.slice(1)));
-    if (!file.startsWith(root)) throw new Error('Invalid path');
+    let pathname;
+    try { pathname = decodeURIComponent(url.pathname); }
+    catch { return json(res, 404, { error: 'Not found' }); }
+    const assetName = PUBLIC_ASSETS.get(pathname);
+    if (!assetName) return json(res, 404, { error: 'Not found' });
+    const file = join(assetRoot, assetName);
     const body = await readFile(file);
     res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(body);

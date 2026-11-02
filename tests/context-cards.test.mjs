@@ -13,6 +13,12 @@ const generatedResult = {
     participationPrompt: 'Which route would you try?'
   }
 };
+const structuredGeneratedResult = {
+  card: Object.fromEntries(Object.entries(generatedResult.card).map(([field, text]) => [
+    field,
+    text === null ? null : { text, evidence: [{ window: 'pre', messageIndex: 0, quote: 'PRIVATE SOURCE QUOTE' }] }
+  ]))
+};
 
 test('new AI draft is private from OBS, and public dashboard output excludes evidence quotes and chat identity fields', () => {
   const store = new ContextCardStore();
@@ -29,6 +35,29 @@ test('new AI draft is private from OBS, and public dashboard output excludes evi
   assert.equal(serialized.includes('quote'), false);
   assert.equal(serialized.includes('chatter_user_id'), false);
   assert.equal(serialized.includes('chatter_user_name'), false);
+});
+
+test('structured claims normalize to text while evidence stays out of dashboard and OBS payloads', () => {
+  const store = new ContextCardStore();
+  store.beginRaid('raid-structured', verifiedFacts);
+  const draftId = store.createDraft('raid-structured', structuredGeneratedResult);
+  const dashboard = store.dashboardView();
+
+  assert.ok(draftId);
+  assert.match(dashboard.draft.text, /RIGHT NOW: The final challenge is underway\./);
+  assert.match(dashboard.draft.text, /THE CONVERSATION: Chat is comparing two routes\./);
+  assert.equal(dashboard.draft.card.whatsHappening, 'The final challenge is underway.');
+  assert.equal(dashboard.draft.card.communityDiscussed, 'Chat is comparing two routes.');
+  assert.equal(dashboard.draft.card.changed, null);
+  assert.equal(JSON.stringify(dashboard).includes('PRIVATE SOURCE QUOTE'), false);
+  assert.equal(JSON.stringify(dashboard).includes('evidence'), false);
+  assert.deepEqual(store.approvedView(), { approved: false });
+
+  assert.equal(store.approve(draftId, dashboard.draft.text), true);
+  const approved = store.approvedView();
+  assert.equal(approved.text, dashboard.draft.text);
+  assert.equal(JSON.stringify(approved).includes('PRIVATE SOURCE QUOTE'), false);
+  assert.equal(JSON.stringify(approved).includes('evidence'), false);
 });
 
 test('only the matching streamer approval publishes edited content to OBS; dismiss clears it', () => {

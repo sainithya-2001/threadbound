@@ -1,6 +1,20 @@
 import { randomUUID } from 'node:crypto';
 
 const MAX_CARD_LENGTH = 1000;
+const CARD_FIELDS = [
+  'whatsHappening',
+  'communityDiscussed',
+  'newcomersMissed',
+  'continued',
+  'changed',
+  'participationPrompt'
+];
+
+function claimText(value) {
+  if (typeof value === 'string') return value;
+  if (value && typeof value === 'object' && typeof value.text === 'string') return value.text;
+  return null;
+}
 
 function safeRaidFacts(facts) {
   if (!facts || typeof facts !== 'object') return null;
@@ -17,12 +31,12 @@ function safeRaidFacts(facts) {
 
 export function flattenCard(card) {
   const rows = [
-    ['RIGHT NOW', card.whatsHappening],
-    ['THE CONVERSATION', card.communityDiscussed],
-    ['WHAT YOU MISSED', card.newcomersMissed],
-    ['STILL GOING', card.continued],
-    ['WHAT CHANGED', card.changed],
-    ['JUMP IN IF YOU LIKE', card.participationPrompt]
+    ['RIGHT NOW', claimText(card.whatsHappening)],
+    ['THE CONVERSATION', claimText(card.communityDiscussed)],
+    ['WHAT YOU MISSED', claimText(card.newcomersMissed)],
+    ['STILL GOING', claimText(card.continued)],
+    ['WHAT CHANGED', claimText(card.changed)],
+    ['JUMP IN IF YOU LIKE', claimText(card.participationPrompt)]
   ].filter(([, value]) => typeof value === 'string' && value.trim());
   return rows.map(([label, value]) => `${label}: ${value.trim()}`).join('\n');
 }
@@ -53,18 +67,12 @@ export class ContextCardStore {
 
   createDraft(raidId, card) {
     if (this.current.raidId !== raidId) return null;
-    const text = flattenCard(card.card);
+    const normalizedCard = Object.fromEntries(CARD_FIELDS.map(field => [field, claimText(card.card[field])]));
+    const text = flattenCard(normalizedCard);
     const draft = {
       id: randomUUID(),
       text,
-      card: {
-        whatsHappening: card.card.whatsHappening,
-        communityDiscussed: card.card.communityDiscussed,
-        newcomersMissed: card.card.newcomersMissed,
-        continued: card.card.continued,
-        changed: card.card.changed,
-        participationPrompt: card.card.participationPrompt
-      },
+      card: normalizedCard,
       generatedAt: new Date().toISOString()
     };
     this.current.status = 'draft';

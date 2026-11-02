@@ -8,8 +8,8 @@ globalThis.fetch = async () => {
   throw new Error('External network access is disabled in the HTTP test harness.');
 };
 
-const { handleRequest } = await import('../server.mjs');
-parentPort.postMessage({ type: 'ready' });
+const { handleRequest, SERVER_HOST } = await import('../server.mjs');
+parentPort.postMessage({ type: 'ready', serverHost: SERVER_HOST });
 
 parentPort.on('message', async ({ id, request }) => {
   const headers = {};
@@ -36,7 +36,7 @@ parentPort.on('message', async ({ id, request }) => {
   req.url = request.url;
   req.headers = request.headers;
   try {
-    await handleRequest(req, response);
+    await handleRequest(req, response, { assetRoot: workerData.assetRoot });
     if (!completed) response.end();
   } catch (error) {
     parentPort.postMessage({ id, harnessError: error?.message || 'Request handler failed.' });

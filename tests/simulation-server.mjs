@@ -1,14 +1,26 @@
 // Loopback-only fixture server. It never loads .env, opens SQLite, or uses live APIs.
 import http from 'node:http';
-import { readFile } from 'node:fs/promises';
-import { extname, join, normalize } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ChatContextWindows } from '../chat-context.mjs';
 import { ContextCardStore } from '../context-cards.mjs';
 import { ConversationIntelligenceError, generateConversationIntelligence } from '../conversation-intelligence.mjs';
 
-const root = fileURLToPath(new URL('../', import.meta.url));
+const root = process.env.THREADBOUND_SIMULATION_ASSET_ROOT
+  ? resolve(process.env.THREADBOUND_SIMULATION_ASSET_ROOT)
+  : fileURLToPath(new URL('../', import.meta.url));
 const mime = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+const PUBLIC_ASSETS = new Map([
+  ['/', 'index.html'],
+  ['/index.html', 'index.html'],
+  ['/overlay.html', 'overlay.html'],
+  ['/styles.css', 'styles.css'],
+  ['/twitch-status.css', 'twitch-status.css'],
+  ['/context-intelligence.css', 'context-intelligence.css'],
+  ['/app.js', 'app.js'],
+  ['/overlay.js', 'overlay.js']
+]);
 const PORT = Number(process.env.THREADBOUND_SIMULATION_PORT || 4176);
 let externalNetworkAttempts = 0;
 globalThis.fetch = async () => {
@@ -161,7 +173,9 @@ async function generateMockDraft(variant = 'valid') {
 
 const server = http.createServer(async (req, res) => {
   try {
-    const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+    let url;
+    try { url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`); }
+    catch { return sendJson(res, 404, { error: 'Not found' }); }
     if (url.pathname === '/api/twitch/status' && req.method === 'GET') return sendJson(res, 200, publicState());
     if (url.pathname === '/api/context/approved' && req.method === 'GET') return sendJson(res, 200, cards.approvedView());
     if (url.pathname === '/api/context/approve' && req.method === 'POST') {
@@ -224,10 +238,19 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    const pathname = decodeURIComponent(url.pathname);
-    const file = normalize(join(root, pathname === '/' ? 'index.html' : pathname.slice(1)));
-    if (!file.startsWith(root)) throw Object.assign(new Error('Invalid path.'), { statusCode: 404 });
-    const body = await readFile(file);
+    const rawPath = String(req.url || '/').split(/[?#]/, 1)[0];
+    if (rawPath.includes('%') || rawPath.includes('\\') || rawPath.split('/').some(part => part === '.' || part === '..')) {
+      return sendJson(res, 404, { error: 'Not found' });
+    }
+    const assetName = PUBLIC_ASSETS.get(rawPath);
+    if (!assetName) return sendJson(res, 404, { error: 'Not found' });
+    const file = resolve(root, assetName);
+    const [realRoot, realFile] = await Promise.all([realpath(root), realpath(file)]);
+    const relativeFile = relative(realRoot, realFile);
+    if (!relativeFile || relativeFile === '..' || relativeFile.startsWith(`..${sep}`) || isAbsolute(relativeFile)) {
+      return sendJson(res, 404, { error: 'Not found' });
+    }
+    const body = await readFile(realFile);
     res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
     res.end(body);
   } catch (error) {

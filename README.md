@@ -1,134 +1,112 @@
 # THREADBOUND
+
 ### Keep the community connected.
 
-**THREADBOUND helps Twitch communities preserve conversation context when new viewers arrive through raids.**
+THREADBOUND helps Twitch streamers preserve the thread of a conversation when a raid brings new viewers into the stream. It captures a short, bounded chat window around a raid and prepares a context card for the streamer to review. The card explains what the conversation is about, what may have been missed, what continued or changed, and one optional way to join in.
 
-A raid can bring an entirely new audience into a stream, but newcomers often arrive in the middle of a conversation. They may not know what the community is discussing, what just happened, or how to participate.
+THREADBOUND is a streamer review tool, not a retention analytics product. It does not measure silent viewer retention or infer individual viewer behavior.
 
-THREADBOUND bridges that context gap.
+## The problem and the product
 
-It captures a bounded window of conversation before and after a raid, identifies what continued or changed, and creates an evidence-grounded context card for the streamer to review. Nothing reaches the public OBS overlay until the streamer approves it.
+A raid transfers viewers, but not the context of the conversation already underway. Streamers often have to welcome newcomers and explain the discussion while continuing to entertain the audience already there.
 
----
+THREADBOUND bridges that gap:
 
-## The problem
+**Twitch raid → bounded conversation windows → context draft → streamer review → approved OBS card**
 
-Twitch raids bring communities together, but conversation doesn't automatically transfer with them.
+If chat is missing or too sparse, the product reports insufficient context instead of inventing a summary.
 
-New arrivals can miss:
-- The topic everyone was discussing.
-- The context behind an ongoing conversation.
-- A change in direction after the raid.
-- An easy way to join the discussion naturally.
+## Streamer workflow
 
-Generic welcome messages acknowledge arrivals, but they don't explain what the community is actually talking about.
+1. Connect the broadcaster with Twitch OAuth.
+2. Authorize the requested **user:read:chat** permission for chat context.
+3. THREADBOUND listens for Twitch **channel.raid** and **channel.chat.message** EventSub events.
+4. It maintains a five-minute rolling pre-raid window and captures a separate three-minute post-raid window. It generates once at 15 seconds if eight unique post-raid messages have arrived; otherwise it generates at 45 seconds using available messages.
+5. With explicit AI analysis consent, THREADBOUND sends bounded message text to the OpenAI Responses API. Consent starts OFF. Insufficient evidence, missing permission, and API errors are reported as separate states.
+6. The streamer edits, approves, or dismisses the draft. Only an approved card is returned by the OBS approval endpoint.
 
-## The solution
+The dashboard keeps verified Twitch raid facts visibly separate from AI-generated claims. Synthetic events and mocked AI output are labelled as test data.
 
-THREADBOUND turns raid arrival into a conversation-continuity experience.
+## Architecture
 
-**Capture → Understand → Review → Approve → Display**
+~~~mermaid
+flowchart LR
+  Twitch[Twitch OAuth + EventSub] --> Raid[Verified raid metadata]
+  Twitch --> Chat[Bounded chat messages]
+  Chat --> Windows[In-memory pre/post windows]
+  Windows --> Consent{Streamer AI consent}
+  Consent -->|On| Responses[OpenAI Responses API]
+  Responses --> Validate[Structured output + evidence checks]
+  Validate --> Draft[In-memory private draft]
+  Raid --> Draft
+  Draft --> Dashboard[Streamer edit / approve / dismiss]
+  Dashboard -->|Approved only| Approved[Approved-card API]
+  Approved --> OBS[OBS browser source]
+~~~
 
-1. **Capture:** Maintain a bounded, temporary chat context before and after a real Twitch raid.
-2. **Understand:** Analyze the two conversation windows separately and identify continuity, changes, and missed context.
-3. **Review:** Generate a structured context card with evidence-grounded claims.
-4. **Approve:** Let the streamer edit, approve, or dismiss the proposed card.
-5. **Display:** Publish only the approved card to the OBS browser source.
-
-If the conversation doesn't contain enough evidence, THREADBOUND reports insufficient context rather than inventing an explanation.
-
----
-
-## What makes THREADBOUND different?
-
-THREADBOUND isn't another generic welcome bot or stream analytics dashboard.
-
-Its central purpose is **conversation continuity across community arrivals**.
-
-- Context comes from actual bounded conversation windows.
-- Pre-raid and post-raid discussion are analyzed separately.
-- Claims must pass server-side evidence-reference and exact-quote validation.
-- The streamer retains editorial control.
-- OBS receives approved content only.
-- Insufficient context is treated as a valid outcome.
-
-## Features
-
-- Twitch broadcaster OAuth.
-- Twitch EventSub raid detection.
-- Twitch chat message subscription.
-- Five-minute pre-raid and three-minute post-raid context windows.
-- Bounded in-memory message capture.
-- Conversation continuity analysis through the OpenAI Responses API.
-- Structured, evidence-validated context drafts.
-- Streamer editing, approval, and dismissal.
-- Separate dashboard and OBS browser source.
-- Isolated sample-data demo mode.
-- Encrypted OAuth token storage.
+- **Server:** Node.js 24, native HTTP server, Twitch OAuth, EventSub WebSocket, and SQLite token store.
+- **Chat:** ChatContextWindows keeps message text and receive time in memory, caps the rolling windows at 160 messages and each message at 500 characters, and discards chatter identity fields.
+- **AI:** OpenAI Responses API with strict JSON Schema output, store=false, no tools, no conversation state, and a bounded request timeout. OPENAI_MODEL is configurable; the current default is gpt-6-luna.
+- **Validation:** every non-null generated claim must cite valid message indexes and exact source-message text. A lexical grounding check rejects terms absent from cited text. This is a heuristic, not proof that a claim semantically follows from its evidence; streamer review remains necessary.
+- **Approval and OBS:** drafts stay in server memory and are visible in the local dashboard/status response. The OBS overlay reads only the approved-card response. A new raid invalidates a prior approval.
+- **Codex:** THREADBOUND was developed iteratively with OpenAI Codex. The built-in and browser tests exercise isolated synthetic fixtures; they do not replace live Twitch verification.
 
 ## Privacy and safety
 
-Privacy is a core design requirement.
+- AI analysis consent is OFF by default and is held in memory. It returns to OFF after a server restart.
+- Chat collection is independent of AI consent. Bounded message text is sent to OpenAI only after opt-in and when the evidence minimum is met. OpenAI processes that submitted content. store=false is a request setting; it should not be read as a guarantee about all provider-side retention.
+- THREADBOUND discards chatter names, IDs, badges, and other identity fields before retaining chat context. It does not persist raw chat to SQLite. The SQLite store is for encrypted OAuth access/refresh tokens and broadcaster profile metadata.
+- Generated card claims can repeat a source sentence verbatim. Evidence references and quotes are not included in dashboard or OBS payloads, but the claim itself may use wording from chat. Inspect the draft before approving it.
+- Turning consent off blocks future requests and aborts an in-flight request where possible. Content already transmitted to OpenAI cannot be recalled.
+- A draft is private from OBS until approval, but anyone who can reach the local dashboard/status endpoint can see that draft. The server binds to 127.0.0.1 by default and has no separate user sign-in; keep it local.
+- The frontend stylesheet imports Google Fonts. In a normal browser session, Google may receive a font request and ordinary browser/network metadata. The automated browser test blocks requests outside its isolated fixture origin.
+- THREADBOUND does not measure silent viewer retention or infer individual viewer characteristics.
 
-- AI analysis consent is OFF by default.
-- Bounded chat text is sent to OpenAI only after explicit consent.
-- Chatter names, IDs, badges, and other identity fields are discarded from captured context.
-- Raw chat is held in memory only and is not persisted to SQLite.
-- AI requests use `store: false`, without tools or conversation state.
-- Turning consent off blocks future requests and aborts pending requests where possible.
-- Content already transmitted cannot be recalled.
-- AI-generated drafts remain private until streamer approval.
-- OBS never receives an unapproved draft.
-- Chat content is treated as untrusted input.
+## Requirements
 
-THREADBOUND does not claim to measure silent viewer retention or infer individual viewer behavior.
-
-## Technology
-
-- **Runtime:** Node.js
-- **Backend:** Native Node.js HTTP server
-- **Frontend:** HTML, CSS, and JavaScript
-- **Platform integration:** Twitch OAuth and EventSub WebSockets
-- **Conversation intelligence:** OpenAI Responses API
-- **OAuth token storage:** SQLite, encrypted at rest
-- **Token security:** AES-256-GCM encryption
-- **Streaming integration:** OBS browser source
-- **Testing:** Node.js built-in test runner
-
-## Run locally
-
-Requirements:
-- Node.js 24 or compatible modern Node.js runtime.
+- Windows or another supported Node.js 24 environment.
 - A Twitch Developer application for live integration.
-- An OpenAI API key for AI analysis.
+- An OpenAI API key and access to the configured model for live AI generation.
+- OBS Studio only if you want to add the browser source to a live scene. The automated overlay test runs in Chromium; it is **not** an OBS Studio test.
 
-### 1. Install dependencies
+## Live app setup
 
-```powershell
+### 1. Install dependencies and browser test browser
+
+~~~powershell
 npm install
-```
+npx playwright install chromium
+~~~
 
-### 2. Configure environment variables
+The Playwright package is a development dependency. Installing Chromium is needed for the automated browser test, not for starting the live app.
 
-Copy `.env.example` to `.env` and configure:
+### 2. Configure Twitch and OpenAI locally
 
-```env
+Copy .env.example to .env, then set the following values for the default local port:
+
+~~~env
+HOST=127.0.0.1
 PORT=4173
 APP_BASE_URL=http://localhost:4173
 TWITCH_REDIRECT_URI=http://localhost:4173/auth/twitch/callback
-
 TWITCH_CLIENT_ID=your_twitch_client_id
 TWITCH_CLIENT_SECRET=your_twitch_client_secret
-
 THREADBOUND_ENCRYPTION_KEY=replace_with_32_byte_base64url_key
-
 OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-6-luna
-```
+~~~
 
-`THREADBOUND_ENCRYPTION_KEY` must decode to exactly 32 bytes. The application accepts base64url or 64 hexadecimal characters. For a new setup, after copying `.env.example` to `.env`, run this in PowerShell to securely generate a base64url key and write it directly into the example placeholder without displaying it:
+Register this exact redirect URL in the Twitch Developer Console:
 
-```powershell
+**http://localhost:4173/auth/twitch/callback**
+
+Keep the same hostname throughout OAuth: localhost and 127.0.0.1 use separate browser cookies. For a different local port, update PORT, APP_BASE_URL, TWITCH_REDIRECT_URI, and the Twitch Console callback to match. The local APP_BASE_URL port must match PORT.
+
+Keep the Twitch client secret, OpenAI key, and encryption key in the server-side .env. .env is excluded from Git; do not paste secrets into frontend code, commit them, or share them in chat.
+
+THREADBOUND_ENCRYPTION_KEY must decode to exactly 32 bytes. The application accepts base64url or 64 hexadecimal characters. For a **new setup only**, after copying .env.example to .env, run this in PowerShell to generate a key and write it to the placeholder without displaying it:
+
+~~~powershell
 $envPath = (Resolve-Path -LiteralPath ".env").Path
 $envText = [System.IO.File]::ReadAllText($envPath)
 $keyPattern = '(?m)^THREADBOUND_ENCRYPTION_KEY=replace_with_32_byte_base64url_key\r?$'
@@ -150,85 +128,74 @@ finally {
     [Array]::Clear($randomBytes, 0, $randomBytes.Length)
     Remove-Variable key, updatedText -ErrorAction SilentlyContinue
 }
-```
+~~~
 
-The key is stored locally in `.env`, which is excluded from Git. Do not run this command for an existing database or replace a key that is already configured: stored OAuth tokens cannot be decrypted with a different key. Keep `.env` private.
+Do not run this command for an existing database or replace an existing key: previously stored OAuth tokens cannot be decrypted with a different key.
 
-Register the exact redirect URL in the Twitch Developer Console:
+### 3. Start the live app
 
-`http://localhost:4173/auth/twitch/callback`
-
-### 3. Start THREADBOUND
-
-```powershell
+~~~powershell
 npm start
-```
+~~~
 
-Open the dashboard:
+- Dashboard: **http://localhost:4173/**
+- OBS browser source: **http://localhost:4173/overlay.html**
+- Status: **http://localhost:4173/api/twitch/status**
 
-`http://localhost:4173/`
+Connect Twitch, authorize chat access, and review the privacy disclosure. AI consent remains OFF until the streamer opts in. Add the overlay URL as an OBS Browser Source. Nothing appears there until a streamer approves a card.
 
-Connect the broadcaster account and authorize the requested chat permission.
+The default bind is local-only. THREADBOUND does not provide separate user authentication; do not expose it on a shared network.
 
-### 4. Open the OBS browser source
+## Demo, synthetic simulation, and automated tests
 
-`http://localhost:4173/overlay.html`
+These are four separate modes:
 
-The overlay remains blank until the streamer approves a context card.
+| Mode | Purpose | Data and integrations |
+|---|---|---|
+| Live app (npm start, default port 4173) | Connect a broadcaster and use real Twitch services | Uses local .env, encrypted token storage, Twitch OAuth/EventSub/chat, and OpenAI only after consent |
+| Demo app (DEMO_MODE=true, example port 4175) | Show illustrative sample content | Ignores Twitch/OpenAI credentials; no OAuth, token DB, EventSub, chat capture, or OpenAI requests; consent is locked OFF |
+| Synthetic simulation (node tests/simulation-server.mjs, default port 4176) | Exercise synthetic raid/chat flow with mocked AI | Loopback-only fixture, in-memory data, no .env, SQLite, Twitch, EventSub, or live OpenAI |
+| Automated browser test (npm test) | Test rendered dashboard and overlay approval flow | Starts a fresh isolated synthetic fixture on port 4177, uses mocked AI, and blocks browser requests outside that fixture origin |
 
-## Isolated demo mode
+Example isolated demo start, in a separate PowerShell window:
 
-THREADBOUND includes an isolated demo mode that uses clearly labelled illustrative sample content.
-
-Start a separate demo instance:
-
-```powershell
+~~~powershell
+$env:HOST = "127.0.0.1"
 $env:PORT = "4175"
 $env:DEMO_MODE = "true"
 node server.mjs
-```
+~~~
 
-Open:
+The demo dashboard and overlay are at http://localhost:4175/ and http://localhost:4175/overlay.html. Sample content is illustrative, never a real Twitch event. The synthetic simulation and automated browser test are test fixtures, not the production app and not evidence of real Twitch message delivery.
 
-- Dashboard: `http://localhost:4175/`
-- OBS overlay: `http://localhost:4175/overlay.html`
+## Tests
 
-Demo mode overrides credentials loaded from `.env`. It does not initialize Twitch OAuth or token storage, connect EventSub, collect chat, or make OpenAI requests. AI consent cannot be enabled in this mode.
+Run the complete test suite:
 
-Sample content is illustrative and is never presented as a real Twitch raid.
-
-## Testing
-
-Run the automated test suite:
-
-```powershell
+~~~powershell
 npm test
-```
+~~~
 
-The test suite covers:
+Run the browser UI test alone:
 
-- Bounded chat capture and expiration.
-- Raid and message deduplication.
-- Twitch EventSub session handling.
-- OAuth state validation and token refresh.
-- Encrypted token persistence.
-- Evidence validation and prompt-injection handling.
-- AI consent and failure handling.
-- Streamer approval and OBS publishing boundaries.
-- Demo-mode isolation.
+~~~powershell
+node --test tests/simulation-browser.test.mjs
+~~~
 
-**Latest verified result: 52 passed, 0 failed, 0 skipped.**
+The suite covers bounded chat capture, EventSub helpers, OAuth state and token refresh, encrypted token persistence, structured AI evidence validation, consent/error handling, demo isolation, simulation asset allowlisting, and the dashboard-to-OBS approval boundary. Playwright Chromium verifies the six generated dashboard fields, populated edit area, blank overlay before approval, approved-card rendering, dismissal, and payload privacy against synthetic data.
 
-## Project status
+The browser test does not use the current live server or manual simulation state. It does not make real OpenAI calls. It does not test an OBS Studio installation.
 
-THREADBOUND is a working prototype with implemented Twitch integration, bounded conversation capture, conversation intelligence, privacy safeguards, and an isolated demo experience.
+**Latest verified test result: 58 passed, 0 failed, 0 skipped.** Update this number after any future test changes.
 
-Twitch OAuth and the `channel.raid` and `channel.chat.message` subscription checks have succeeded in prior integration verification. Full end-to-end validation of a real raid through AI generation and OBS publication remains a testing goal.
+## Verification limits and project status
 
-## Vision
+Twitch OAuth and EventSub subscription checks were verified in prior live checks. The complete real-world sequence—live raid, real chat delivery, OpenAI generation, streamer approval, and OBS publication—has **not** been verified end to end. OpenAI requests in automated tests are mocked. The overlay has been tested in Chromium, not in OBS Studio.
 
-We believe a raid should be more than an audience transfer.
+THREADBOUND is a working prototype. It implements Twitch integration, bounded conversation capture, evidence-checked context drafts, streamer approval, encrypted OAuth token storage, a separate sample demo, and a synthetic browser test. It does not claim to measure retention or know information Twitch does not expose.
 
-It should be a moment when communities can connect without losing the conversation that brought them together.
+## Hackathon submission materials
+
+The official [Codex x TwitchCon Hackathon rules](https://twitchcon-codex.devpost.com/rules) specify a repository link, a project description that explains features and Codex usage, a Codex session ID, and a publicly visible YouTube demo video under three minutes showing the project functioning on Twitch and how it was built with Codex. The rules allow a private GitHub/GitLab repository when shared with the address listed on the rules page. Confirm access and submission fields in Devpost before submitting.
 
 **THREADBOUND — Keep the community connected.**

@@ -2,12 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { Worker } from 'node:worker_threads';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { once } from 'node:events';
 
-function createHttpHarness(environment = {}) {
+function createHttpHarness(environment = {}, assetRoot) {
+  const configuredOrigin = environment.APP_BASE_URL || environment.TWITCH_REDIRECT_URI || 'http://localhost:4173';
+  const configuredPort = new URL(configuredOrigin).port || '4173';
   const safeEnvironment = {
     PATH: process.env.PATH || '',
     SystemRoot: process.env.SystemRoot || '',
@@ -15,6 +17,7 @@ function createHttpHarness(environment = {}) {
     TMP: process.env.TMP || tmpdir(),
     NODE_ENV: 'test',
     THREADBOUND_TEST_NO_LISTEN: 'true',
+    PORT: configuredPort,
     DEMO_MODE: 'false',
     TWITCH_CLIENT_ID: '',
     TWITCH_CLIENT_SECRET: '',
@@ -22,14 +25,14 @@ function createHttpHarness(environment = {}) {
     OPENAI_API_KEY: '',
     ...environment
   };
-  const worker = new Worker(new URL('./http-harness-worker.mjs', import.meta.url), { env: safeEnvironment });
+  const worker = new Worker(new URL('./http-harness-worker.mjs', import.meta.url), { env: safeEnvironment, workerData: { assetRoot } });
   let nextId = 0;
   const pending = new Map();
   let readyResolve;
   let readyReject;
   const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   worker.on('message', message => {
-    if (message.type === 'ready') { readyResolve(); return; }
+    if (message.type === 'ready') { readyResolve(message); return; }
     const current = pending.get(message.id);
     if (!current) return;
     pending.delete(message.id);
@@ -57,6 +60,7 @@ function createHttpHarness(environment = {}) {
   });
 
   return {
+    serverHost: ready.then(message => message.serverHost),
     async fetch(input, options = {}) {
       await ready;
       const target = new URL(input);
@@ -76,10 +80,50 @@ function createHttpHarness(environment = {}) {
   };
 }
 
+test('static handler serves only allowlisted public assets from an isolated root', async t => {
+  const assetRoot = mkdtempSync(join(tmpdir(), 'threadbound-static-root-'));
+  t.after(() => rmSync(assetRoot, { recursive: true, force: true }));
+  const publicFiles = ['index.html', 'overlay.html', 'styles.css', 'twitch-status.css', 'context-intelligence.css', 'app.js', 'overlay.js'];
+  for (const name of publicFiles) writeFileSync(join(assetRoot, name), `PUBLIC_ASSET:${name}`);
+  const privateFiles = [
+    '.env', '.git/config', 'server.mjs', 'package.json', 'data/threadbound.sqlite',
+    'backup.sqlite', 'tokens.sqlite-wal', '.hidden', 'private.txt'
+  ];
+  for (const name of privateFiles) {
+    const target = join(assetRoot, name);
+    const parent = dirname(target);
+    if (parent !== assetRoot) mkdirSync(parent, { recursive: true });
+    writeFileSync(target, `FAKE_PRIVATE_FIXTURE:${name}`);
+  }
+
+  const base = 'http://127.0.0.1:43791';
+  const harness = createHttpHarness({ APP_BASE_URL: base }, assetRoot);
+  t.after(() => harness.close());
+  for (const path of ['/', '/index.html', ...publicFiles.slice(1).map(name => `/${name}`)]) {
+    const response = await harness.fetch(`${base}${path}`);
+    assert.equal(response.status, 200, `${path} should be public`);
+    assert.match(await response.text(), /PUBLIC_ASSET:/);
+  }
+
+  const deniedPaths = [
+    '/.env', '/%2eenv', '/%2Eenv', '/.%65nv', '/.git/config', '/%2e%67it/config',
+    '/server.mjs', '/server%2emjs', '/package.json', '/data/threadbound.sqlite',
+    '/backup.sqlite', '/tokens.sqlite-wal', '/.hidden', '/private.txt',
+    '/../private.txt', '/%2e%2e/private.txt', '/%252e%252e/private.txt',
+    '/%2fserver.mjs', '/%5cserver.mjs', '/%00.env'
+  ];
+  for (const path of deniedPaths) {
+    const response = await harness.fetch(`${base}${path}`);
+    assert.equal(response.status, 404, `${path} must not resolve to a file`);
+    assert.doesNotMatch(await response.text(), /FAKE_PRIVATE_FIXTURE/);
+  }
+});
+
 test('server exposes dashboard and OBS, and can begin OAuth with only the public client ID', async t => {
   const port = 43000 + (process.pid % 10000);
   const base = `http://127.0.0.1:${port}`;
   const harness = createHttpHarness({ APP_BASE_URL: base, TWITCH_REDIRECT_URI: `${base}/auth/twitch/callback`, TWITCH_CLIENT_ID: 'test-client-id' });
+  assert.equal(await harness.serverHost, '127.0.0.1');
   const fetch = harness.fetch;
   t.after(() => harness.close());
 
@@ -183,6 +227,48 @@ test('OAuth start redirects with a one-time state cookie and keeps the secret se
   const incorrectCookie = await fetch(`${canonicalOrigin}/auth/twitch/callback?code=fake&state=${retryState}`, { headers: { Cookie: 'rb_oauth=wrong-state' }, redirect: 'manual' });
   assert.equal(incorrectCookie.status, 400);
   assert.match(await incorrectCookie.text(), /security check did not match/);
+});
+
+test('OAuth initiation stays on port 4174 through canonicalization and Twitch callback construction', async t => {
+  const canonicalOrigin = 'http://localhost:4174';
+  const aliasOrigin = 'http://127.0.0.1:4174';
+  const harness = createHttpHarness({
+    HOST: '127.0.0.1', PORT: '4174', APP_BASE_URL: canonicalOrigin,
+    TWITCH_REDIRECT_URI: `${canonicalOrigin}/auth/twitch/callback`,
+    TWITCH_CLIENT_ID: 'test-client-id'
+  });
+  t.after(() => harness.close());
+
+  const canonicalized = await harness.fetch(`${aliasOrigin}/auth/twitch`, { redirect: 'manual' });
+  assert.equal(canonicalized.status, 302);
+  assert.equal(canonicalized.headers.get('location'), `${canonicalOrigin}/auth/twitch`);
+  assert.doesNotMatch(canonicalized.headers.get('location'), /:4173/);
+
+  const started = await harness.fetch(`${canonicalOrigin}/auth/twitch`, { redirect: 'manual' });
+  assert.equal(started.status, 302);
+  const authorization = new URL(started.headers.get('location'));
+  assert.equal(authorization.origin, 'https://id.twitch.tv');
+  assert.equal(authorization.searchParams.get('redirect_uri'), `${canonicalOrigin}/auth/twitch/callback`);
+  assert.match(started.headers.get('set-cookie'), /HttpOnly/);
+});
+
+test('startup rejects stale localhost base ports and mismatched Twitch callback origins', async t => {
+  const project = new URL('..', import.meta.url);
+  for (const configuration of [
+    { PORT: '4174', APP_BASE_URL: 'http://localhost:4173', TWITCH_REDIRECT_URI: 'http://localhost:4173/auth/twitch/callback' },
+    { PORT: '4174', APP_BASE_URL: 'http://localhost:4174', TWITCH_REDIRECT_URI: 'http://localhost:4173/auth/twitch/callback' }
+  ]) {
+    const child = spawn(process.execPath, ['server.mjs'], {
+      cwd: project,
+      env: { PATH: process.env.PATH || '', SystemRoot: process.env.SystemRoot || '', NODE_ENV: 'test', THREADBOUND_TEST_NO_LISTEN: 'true', ...configuration },
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+    let logs = '';
+    child.stderr.on('data', chunk => { logs += chunk.toString(); });
+    const [code] = await once(child, 'exit');
+    assert.notEqual(code, 0);
+    assert.match(logs, /APP_BASE_URL port must match PORT|TWITCH_REDIRECT_URI must match APP_BASE_URL/);
+  }
 });
 
 test('consent endpoint accepts the host serving the app when it differs from the canonical origin', async t => {
