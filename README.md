@@ -126,7 +126,33 @@ OPENAI_API_KEY=your_openai_api_key
 OPENAI_MODEL=gpt-6-luna
 ```
 
-Set `THREADBOUND_ENCRYPTION_KEY` to a randomly generated 32-byte key encoded as base64url (or 64 hexadecimal characters). Keep `.env` private. It is excluded from Git.
+`THREADBOUND_ENCRYPTION_KEY` must decode to exactly 32 bytes. The application accepts base64url or 64 hexadecimal characters. For a new setup, after copying `.env.example` to `.env`, run this in PowerShell to securely generate a base64url key and write it directly into the example placeholder without displaying it:
+
+```powershell
+$envPath = (Resolve-Path -LiteralPath ".env").Path
+$envText = [System.IO.File]::ReadAllText($envPath)
+$keyPattern = '(?m)^THREADBOUND_ENCRYPTION_KEY=replace_with_32_byte_base64url_key\r?$'
+$keyAssignments = [regex]::Matches($envText, '(?m)^\s*THREADBOUND_ENCRYPTION_KEY\s*=')
+if ($keyAssignments.Count -ne 1 -or [regex]::Matches($envText, $keyPattern).Count -ne 1) {
+    throw "Refusing to replace an existing or unexpected encryption-key setting. Keep any existing key unchanged."
+}
+
+$randomBytes = New-Object byte[] 32
+$randomGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+try {
+    $randomGenerator.GetBytes($randomBytes)
+    $key = [Convert]::ToBase64String($randomBytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $updatedText = [regex]::Replace($envText, $keyPattern, "THREADBOUND_ENCRYPTION_KEY=$key", 1)
+    [System.IO.File]::WriteAllText($envPath, $updatedText, [System.Text.UTF8Encoding]::new($false))
+}
+finally {
+    $randomGenerator.Dispose()
+    [Array]::Clear($randomBytes, 0, $randomBytes.Length)
+    Remove-Variable key, updatedText -ErrorAction SilentlyContinue
+}
+```
+
+The key is stored locally in `.env`, which is excluded from Git. Do not run this command for an existing database or replace a key that is already configured: stored OAuth tokens cannot be decrypted with a different key. Keep `.env` private.
 
 Register the exact redirect URL in the Twitch Developer Console:
 
@@ -191,7 +217,7 @@ The test suite covers:
 - Streamer approval and OBS publishing boundaries.
 - Demo-mode isolation.
 
-**Latest verified result: 43 tests passed, 0 failed.**
+**Latest verified result: 52 passed, 0 failed, 0 skipped.**
 
 ## Project status
 

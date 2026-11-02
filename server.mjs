@@ -13,7 +13,10 @@ import { assessChatMessageSubscription, buildChatMessageSubscriptionRequest, Cha
 import { assessConversationReadiness, ConversationIntelligenceError, createRaidGenerationSchedule, generateConversationIntelligence } from './conversation-intelligence.mjs';
 import { ContextCardStore } from './context-cards.mjs';
 
-try { process.loadEnvFile(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+// Test workers supply an explicit environment and must never read local secrets.
+if (process.env.NODE_ENV !== 'test') {
+  try { process.loadEnvFile(); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
 
 function parseDemoMode(value) {
   if (value === undefined) return false;
@@ -517,7 +520,7 @@ function sameOriginRequest(req) {
   catch { return false; }
 }
 
-const server = http.createServer(async (req, res) => {
+export async function handleRequest(req, res) {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
     if (url.pathname === '/api/twitch/status' && req.method === 'GET') return json(res, 200, publicState());
@@ -620,7 +623,9 @@ const server = http.createServer(async (req, res) => {
     const code = error.statusCode || (error.code === 'ENOENT' ? 404 : 500);
     res.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' }); res.end(code === 404 ? 'Not found' : 'Server error');
   }
-});
+}
+
+const server = http.createServer(handleRequest);
 
 async function restorePersistedSession() {
   if (DEMO_MODE || !tokenStoreReady) return;
@@ -678,11 +683,13 @@ async function restorePersistedSession() {
   }
 }
 
-server.listen(PORT, HOST, () => {
-  console.log(`THREADBOUND listening on ${HOST}:${PORT}`);
-  if (DEMO_MODE) console.log('DEMO_MODE=true; Twitch OAuth, token storage, EventSub, chat, and OpenAI are disabled. Only labeled sample data is available.');
-  else if (CLIENT_ID && CLIENT_SECRET) console.log(`Twitch OAuth configured; redirect URI: ${REDIRECT_URI}`);
-  else if (CLIENT_ID) console.log('Twitch authorization can start; add the Client Secret locally to complete token exchange.');
-  else console.log('Twitch app Client ID not configured; demo mode is available.');
-  if (!DEMO_MODE && tokenStoreReady) void restorePersistedSession();
-});
+if (!(process.env.NODE_ENV === 'test' && process.env.THREADBOUND_TEST_NO_LISTEN === 'true')) {
+  server.listen(PORT, HOST, () => {
+    console.log(`THREADBOUND listening on ${HOST}:${PORT}`);
+    if (DEMO_MODE) console.log('DEMO_MODE=true; Twitch OAuth, token storage, EventSub, chat, and OpenAI are disabled. Only labeled sample data is available.');
+    else if (CLIENT_ID && CLIENT_SECRET) console.log(`Twitch OAuth configured; redirect URI: ${REDIRECT_URI}`);
+    else if (CLIENT_ID) console.log('Twitch authorization can start; add the Client Secret locally to complete token exchange.');
+    else console.log('Twitch app Client ID not configured; demo mode is available.');
+    if (!DEMO_MODE && tokenStoreReady) void restorePersistedSession();
+  });
+}

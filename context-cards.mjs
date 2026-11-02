@@ -4,12 +4,14 @@ const MAX_CARD_LENGTH = 1000;
 
 function safeRaidFacts(facts) {
   if (!facts || typeof facts !== 'object') return null;
+  const synthetic = facts.synthetic === true;
   return {
     sourceChannel: typeof facts.sourceChannel === 'string' ? facts.sourceChannel.slice(0, 80) : 'Unknown channel',
     destinationChannel: typeof facts.destinationChannel === 'string' ? facts.destinationChannel.slice(0, 80) : 'Connected channel',
     viewerCount: Number.isInteger(facts.viewerCount) && facts.viewerCount >= 0 ? facts.viewerCount : null,
     receivedAt: typeof facts.receivedAt === 'string' ? facts.receivedAt : new Date().toISOString(),
-    verifiedBy: 'Twitch EventSub'
+    synthetic,
+    verifiedBy: synthetic ? 'Synthetic test fixture' : 'Twitch EventSub'
   };
 }
 

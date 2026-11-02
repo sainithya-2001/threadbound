@@ -5,10 +5,10 @@ function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
 }
 
-function renderEmpty(demoMode = false) {
-  const heading = demoMode ? 'Demo preview' : 'Ready when you are.';
-  const copy = demoMode ? 'Illustrative sample content only.<br/>No Twitch or AI services are connected.' : 'Your arrival card will appear here<br/>after the streamer approves it.';
-  const footer = demoMode ? 'DEMO MODE · NOTHING LIVE IS CONNECTED' : 'Nothing shows without approval';
+function renderEmpty(demoMode = false, simulationMode = false) {
+  const heading = simulationMode ? 'Simulation preview' : demoMode ? 'Demo preview' : 'Ready when you are.';
+  const copy = simulationMode ? 'Synthetic test data only.<br/>No Twitch or OpenAI services are connected.' : demoMode ? 'Illustrative sample content only.<br/>No Twitch or AI services are connected.' : 'Your arrival card will appear here<br/>after the streamer approves it.';
+  const footer = simulationMode ? 'SIMULATION MODE · TEST DATA ONLY' : demoMode ? 'DEMO MODE · NOTHING LIVE IS CONNECTED' : 'Nothing shows without approval';
   stage.innerHTML = `<div class="overlay-empty"><div class="empty-mark"><span>⌁</span><i></i></div><div class="empty-label"><span class="empty-line"></span> THREADBOUND <span class="empty-line"></span></div><h1>${heading}</h1><p>${copy}</p><div class="empty-foot"><span class="empty-lock">◆</span> ${footer}</div></div>`;
 }
 
@@ -23,7 +23,10 @@ function renderApproved(card) {
   if (!card || card.approved !== true || typeof card.text !== 'string' || !card.text.trim()) return renderEmpty();
   const facts = card.raidFacts || {};
   const detail = [facts.sourceChannel, Number.isInteger(facts.viewerCount) ? `${facts.viewerCount.toLocaleString()} viewers` : null].filter(Boolean).join(' · ');
-  stage.innerHTML = `<article class="approved-overlay-card"><div class="approved-overlay-top"><span class="preview-brand"><span class="mini-wave">⌁</span> THREADBOUND</span><span class="approved-overlay-label"><i></i> STREAMER APPROVED</span></div><div class="approved-overlay-content">${detail ? `<div class="live-overlay-verified">✓ VERIFIED RAID · ${escapeHtml(detail)}<small>Event information from Twitch EventSub</small></div>` : ''}<div class="approved-overlay-meta"><span class="preview-live-dot"></span> AI-GENERATED CONVERSATION BRIDGE</div><p class="approved-live-text">${escapeHtml(card.text).replace(/\n/g, '<br>')}</p></div><div class="approved-overlay-bottom"><span><b>✳</b> A little context goes a long way.</span><span class="overlay-brand-end">THREADBOUND</span></div></article>`;
+  const eventLabel = facts.synthetic === true ? 'SYNTHETIC TEST EVENT' : '✓ VERIFIED RAID';
+  const eventSource = facts.synthetic === true ? 'Fixture data only · no Twitch event' : 'Event information from Twitch EventSub';
+  const aiLabel = facts.synthetic === true ? 'MOCKED AI RESPONSE · TEST ONLY' : 'AI-GENERATED CONVERSATION BRIDGE';
+  stage.innerHTML = `<article class="approved-overlay-card"><div class="approved-overlay-top"><span class="preview-brand"><span class="mini-wave">⌁</span> THREADBOUND</span><span class="approved-overlay-label"><i></i> STREAMER APPROVED</span></div><div class="approved-overlay-content">${detail ? `<div class="live-overlay-verified">${eventLabel} · ${escapeHtml(detail)}<small>${eventSource}</small></div>` : ''}<div class="approved-overlay-meta"><span class="preview-live-dot"></span> ${aiLabel}</div><p class="approved-live-text">${escapeHtml(card.text).replace(/\n/g, '<br>')}</p></div><div class="approved-overlay-bottom"><span><b>✳</b> A little context goes a long way.</span><span class="overlay-brand-end">THREADBOUND</span></div></article>`;
 }
 
 // Start blank; the server must confirm whether this is live mode and return an
@@ -39,6 +42,16 @@ async function syncConnection() {
     if (state.demoMode === true) {
       connected = false;
       renderSample(true);
+      return;
+    }
+    if (state.simulationMode === true) {
+      connected = true;
+      const approvedResponse = await fetch('/api/context/approved', { cache: 'no-store' });
+      if (!approvedResponse.ok) return renderEmpty(false, true);
+      const card = await approvedResponse.json();
+      if (card.raidFacts) card.raidFacts.synthetic = true;
+      if (!card.approved) return renderEmpty(false, true);
+      renderApproved(card);
       return;
     }
     const next = Boolean(state.connected);

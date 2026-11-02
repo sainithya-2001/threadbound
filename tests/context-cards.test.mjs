@@ -60,3 +60,10 @@ test('new raid invalidates any previous approval and flattens a bounded structur
   assert.match(flattenCard(generatedResult.card), /THE CONVERSATION: Chat is comparing two routes\./);
   assert.doesNotMatch(flattenCard(generatedResult.card), /WHAT CHANGED:/);
 });
+
+test('synthetic raid facts are never labeled as verified Twitch metadata', () => {
+  const store = new ContextCardStore();
+  store.beginRaid('synthetic-raid', { sourceChannel: 'FixtureSource', synthetic: true });
+  assert.equal(store.dashboardView().raidFacts.synthetic, true);
+  assert.equal(store.dashboardView().raidFacts.verifiedBy, 'Synthetic test fixture');
+});

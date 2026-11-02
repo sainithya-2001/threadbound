@@ -1,32 +1,87 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { Worker } from 'node:worker_threads';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { once } from 'node:events';
-import { fileURLToPath } from 'node:url';
+
+function createHttpHarness(environment = {}) {
+  const safeEnvironment = {
+    PATH: process.env.PATH || '',
+    SystemRoot: process.env.SystemRoot || '',
+    TEMP: process.env.TEMP || tmpdir(),
+    TMP: process.env.TMP || tmpdir(),
+    NODE_ENV: 'test',
+    THREADBOUND_TEST_NO_LISTEN: 'true',
+    DEMO_MODE: 'false',
+    TWITCH_CLIENT_ID: '',
+    TWITCH_CLIENT_SECRET: '',
+    THREADBOUND_ENCRYPTION_KEY: '',
+    OPENAI_API_KEY: '',
+    ...environment
+  };
+  const worker = new Worker(new URL('./http-harness-worker.mjs', import.meta.url), { env: safeEnvironment });
+  let nextId = 0;
+  const pending = new Map();
+  let readyResolve;
+  let readyReject;
+  const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
+  worker.on('message', message => {
+    if (message.type === 'ready') { readyResolve(); return; }
+    const current = pending.get(message.id);
+    if (!current) return;
+    pending.delete(message.id);
+    if (message.harnessError) current.reject(new Error(message.harnessError));
+    else current.resolve({
+      status: message.status,
+      headers: { get: name => message.headers[name.toLowerCase()] || null },
+      text: async () => message.body,
+      json: async () => JSON.parse(message.body),
+      externalRequestAttempts: message.externalRequestAttempts
+    });
+  });
+  worker.on('error', error => {
+    readyReject(error);
+    for (const current of pending.values()) current.reject(error);
+    pending.clear();
+  });
+  worker.on('exit', code => {
+    if (code !== 0) {
+      const error = new Error(`HTTP test worker exited with code ${code}.`);
+      readyReject(error);
+      for (const current of pending.values()) current.reject(error);
+      pending.clear();
+    }
+  });
+
+  return {
+    async fetch(input, options = {}) {
+      await ready;
+      const target = new URL(input);
+      const headers = Object.fromEntries(Object.entries(options.headers || {}).map(([name, value]) => [name.toLowerCase(), String(value)]));
+      headers.host ||= target.host;
+      const id = ++nextId;
+      const response = new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      worker.postMessage({ id, request: {
+        method: options.method || 'GET',
+        url: `${target.pathname}${target.search}`,
+        headers,
+        body: options.body || ''
+      } });
+      return response;
+    },
+    async close() { await worker.terminate(); }
+  };
+}
 
 test('server exposes dashboard and OBS, and can begin OAuth with only the public client ID', async t => {
   const port = 43000 + (process.pid % 10000);
-  const child = spawn(process.execPath, ['server.mjs'], {
-    cwd: new URL('..', import.meta.url),
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', APP_BASE_URL: `http://127.0.0.1:${port}`, TWITCH_REDIRECT_URI: `http://127.0.0.1:${port}/auth/twitch/callback`, TWITCH_CLIENT_ID: 'test-client-id', TWITCH_CLIENT_SECRET: '' },
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
-  let logs = '';
-  child.stdout.on('data', chunk => { logs += chunk.toString(); });
-  child.stderr.on('data', chunk => { logs += chunk.toString(); });
-  t.after(async () => { child.kill(); await once(child, 'exit'); });
-
   const base = `http://127.0.0.1:${port}`;
-  let ready = false;
-  let lastError = '';
-  for (let attempt = 0; attempt < 60 && !ready; attempt++) {
-    if (child.exitCode !== null) break;
-    try { ready = (await fetch(`${base}/api/twitch/status`)).ok; } catch (error) { lastError = error.message; await new Promise(resolve => setTimeout(resolve, 100)); }
-  }
-  assert.equal(ready, true, `Server did not start. Output: ${logs} Last HTTP error: ${lastError}`);
+  const harness = createHttpHarness({ APP_BASE_URL: base, TWITCH_REDIRECT_URI: `${base}/auth/twitch/callback`, TWITCH_CLIENT_ID: 'test-client-id' });
+  const fetch = harness.fetch;
+  t.after(() => harness.close());
 
   const dashboard = await fetch(`${base}/`);
   assert.equal(dashboard.status, 200);
@@ -97,20 +152,10 @@ test('OAuth start redirects with a one-time state cookie and keeps the secret se
   const port = 43000 + ((process.pid + 1) % 10000);
   const canonicalOrigin = `http://127.0.0.1:${port}`;
   const tempDir = mkdtempSync(join(tmpdir(), 'threadbound-server-test-'));
-  const child = spawn(process.execPath, ['server.mjs'], {
-    cwd: new URL('..', import.meta.url),
-    env: { ...process.env, PORT: String(port), HOST: '0.0.0.0', APP_BASE_URL: canonicalOrigin, TWITCH_REDIRECT_URI: `${canonicalOrigin}/auth/twitch/callback`, TWITCH_CLIENT_ID: 'test-client-id', TWITCH_CLIENT_SECRET: 'server-only-test-secret', THREADBOUND_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64url'), THREADBOUND_TOKEN_DB: join(tempDir, 'tokens.sqlite') },
-    stdio: ['ignore', 'ignore', 'pipe']
-  });
-  t.after(async () => { child.kill(); await once(child, 'exit'); rmSync(tempDir, { recursive: true, force: true }); });
+  const harness = createHttpHarness({ APP_BASE_URL: canonicalOrigin, TWITCH_REDIRECT_URI: `${canonicalOrigin}/auth/twitch/callback`, TWITCH_CLIENT_ID: 'test-client-id', TWITCH_CLIENT_SECRET: 'server-only-test-secret', THREADBOUND_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64url'), THREADBOUND_TOKEN_DB: join(tempDir, 'tokens.sqlite') });
+  const fetch = harness.fetch;
+  t.after(async () => { await harness.close(); rmSync(tempDir, { recursive: true, force: true }); });
   const base = `http://127.0.0.1:${port}`;
-  let ready = false;
-  let lastError = '';
-  for (let attempt = 0; attempt < 60 && !ready; attempt++) {
-    if (child.exitCode !== null) break;
-    try { ready = (await fetch(`${base}/api/twitch/status`)).ok; } catch (error) { lastError = error.message; await new Promise(resolve => setTimeout(resolve, 100)); }
-  }
-  assert.equal(ready, true, `Configured test server should start; ${lastError}`);
   const canonicalize = await fetch(`${canonicalOrigin}/auth/twitch`, { redirect: 'manual' });
   assert.equal(canonicalize.status, 302);
   assert.equal(new URL(canonicalize.headers.get('location')).origin, 'https://id.twitch.tv');
@@ -143,19 +188,10 @@ test('OAuth start redirects with a one-time state cookie and keeps the secret se
 test('consent endpoint accepts the host serving the app when it differs from the canonical origin', async t => {
   const port = 43000 + ((process.pid + 2) % 10000);
   const canonicalOrigin = `http://localhost:${port}`;
-  const child = spawn(process.execPath, ['server.mjs'], {
-    cwd: new URL('..', import.meta.url),
-    env: { ...process.env, PORT: String(port), HOST: '0.0.0.0', APP_BASE_URL: canonicalOrigin, TWITCH_REDIRECT_URI: `${canonicalOrigin}/auth/twitch/callback`, TWITCH_CLIENT_ID: '', TWITCH_CLIENT_SECRET: '', OPENAI_API_KEY: '' },
-    stdio: ['ignore', 'ignore', 'pipe']
-  });
-  t.after(async () => { child.kill(); await once(child, 'exit'); });
+  const harness = createHttpHarness({ APP_BASE_URL: canonicalOrigin, TWITCH_REDIRECT_URI: `${canonicalOrigin}/auth/twitch/callback` });
+  const fetch = harness.fetch;
+  t.after(() => harness.close());
   const servedOrigin = `http://127.0.0.1:${port}`;
-  let ready = false;
-  for (let attempt = 0; attempt < 60 && !ready; attempt++) {
-    if (child.exitCode !== null) break;
-    try { ready = (await fetch(`${servedOrigin}/api/twitch/status`)).ok; } catch { await new Promise(resolve => setTimeout(resolve, 100)); }
-  }
-  assert.equal(ready, true, 'Alternate-origin consent test server should start.');
   const response = await fetch(`${servedOrigin}/api/context/consent`, {
     method: 'POST', headers: { 'Content-Type': 'application/json', Origin: servedOrigin }, body: JSON.stringify({ enabled: true })
   });
@@ -172,46 +208,18 @@ test('explicit demo mode ignores live credentials and blocks Twitch, chat, AI, a
   const base = `http://127.0.0.1:${port}`;
   const tempDir = mkdtempSync(join(tmpdir(), 'threadbound-demo-test-'));
   const databasePath = join(tempDir, 'must-not-be-opened.sqlite');
-  const auditPath = join(tempDir, 'network-attempts.log');
-  const denyNetworkPath = fileURLToPath(new URL('./deny-network.cjs', import.meta.url)).replaceAll('\\', '/');
-  const nodeOptions = [process.env.NODE_OPTIONS, `--require=${denyNetworkPath}`].filter(Boolean).join(' ');
-  const child = spawn(process.execPath, ['server.mjs'], {
-    cwd: new URL('..', import.meta.url),
-    env: {
-      ...process.env,
-      NODE_OPTIONS: nodeOptions,
-      THREADBOUND_TEST_NETWORK_AUDIT: auditPath,
-      PORT: String(port), HOST: '127.0.0.1', APP_BASE_URL: base,
-      TWITCH_REDIRECT_URI: `${base}/auth/twitch/callback`,
-      DEMO_MODE: 'true',
-      TWITCH_CLIENT_ID: 'demo-test-client-id',
-      TWITCH_CLIENT_SECRET: 'demo-test-client-secret',
-      OPENAI_API_KEY: 'demo-test-openai-key',
-      THREADBOUND_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64url'),
-      THREADBOUND_TOKEN_DB: databasePath
-    },
-    stdio: ['ignore', 'pipe', 'pipe']
+  const harness = createHttpHarness({
+    APP_BASE_URL: base,
+    TWITCH_REDIRECT_URI: `${base}/auth/twitch/callback`,
+    DEMO_MODE: 'true',
+    TWITCH_CLIENT_ID: 'demo-test-client-id',
+    TWITCH_CLIENT_SECRET: 'demo-test-client-secret',
+    OPENAI_API_KEY: 'demo-test-openai-key',
+    THREADBOUND_ENCRYPTION_KEY: Buffer.alloc(32, 9).toString('base64url'),
+    THREADBOUND_TOKEN_DB: databasePath
   });
-  let logs = '';
-  child.stdout.on('data', chunk => { logs += chunk.toString(); });
-  child.stderr.on('data', chunk => { logs += chunk.toString(); });
-  t.after(async () => {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, 'exit');
-      child.kill();
-      await exited;
-    }
-    rmSync(tempDir, { recursive: true, force: true });
-  });
-
-  let ready = false;
-  let lastError = '';
-  for (let attempt = 0; attempt < 60 && !ready; attempt++) {
-    if (child.exitCode !== null) break;
-    try { ready = (await fetch(`${base}/api/twitch/status`)).ok; }
-    catch (error) { lastError = error.message; await new Promise(resolve => setTimeout(resolve, 100)); }
-  }
-  assert.equal(ready, true, `Demo server did not start. Output: ${logs} Last HTTP error: ${lastError}`);
+  const fetch = harness.fetch;
+  t.after(async () => { await harness.close(); rmSync(tempDir, { recursive: true, force: true }); });
 
   const dashboard = await fetch(`${base}/`);
   assert.equal(dashboard.status, 200);
@@ -268,16 +276,14 @@ test('explicit demo mode ignores live credentials and blocks Twitch, chat, AI, a
   assert.deepEqual(await disableConsent.json(), { enabled: false, locked: true });
   assert.deepEqual(await (await fetch(`${base}/api/context/approved`)).json(), { approved: false });
 
-  await new Promise(resolve => setTimeout(resolve, 150));
-  assert.equal(existsSync(auditPath), false, 'demo startup and consent attempts must not call Twitch, EventSub, chat, or OpenAI network APIs');
-  assert.doesNotMatch(logs, /Twitch OAuth configured|Twitch confirmed|Conversation draft ready/);
-  assert.match(logs, /DEMO_MODE=true; Twitch OAuth, token storage, EventSub, chat, and OpenAI are disabled/);
+  const finalStatus = await fetch(`${base}/api/twitch/status`);
+  assert.equal(finalStatus.externalRequestAttempts, 0, 'demo request handling must not call external HTTP APIs');
 });
 
 test('invalid DEMO_MODE values fail startup instead of falling back to live mode', async () => {
   const child = spawn(process.execPath, ['server.mjs'], {
     cwd: new URL('..', import.meta.url),
-    env: { ...process.env, PORT: String(43000 + ((process.pid + 4) % 10000)), DEMO_MODE: 'sometimes' },
+    env: { ...process.env, NODE_ENV: 'test', PORT: String(43000 + ((process.pid + 4) % 10000)), DEMO_MODE: 'sometimes' },
     stdio: ['ignore', 'ignore', 'pipe']
   });
   let logs = '';

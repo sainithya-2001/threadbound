@@ -44,7 +44,7 @@
 
         <section class="sample-banner" id="sample-banner" aria-label="Sample data notice"><span class="sample-symbol">✳</span><div><strong id="sample-banner-title">You're exploring with sample data</strong><span id="sample-banner-copy">Stream, chat, and raid details below are illustrative and are not from a connected Twitch channel.</span></div><span class="sample-tag" id="sample-banner-tag">SAMPLE</span></section>
 
-        <section class="ai-consent-panel" aria-labelledby="ai-consent-title">
+        <section class="ai-consent-panel" id="ai-consent-panel" aria-labelledby="ai-consent-title">
           <div class="ai-consent-copy">
             <div class="ai-consent-heading"><span class="ai-consent-symbol">◈</span><div><span class="section-kicker">PRIVACY &amp; AI ANALYSIS</span><h2 id="ai-consent-title">Your chat stays here unless you opt in.</h2></div></div>
             <p>Off by default. When enabled, THREADBOUND sends only message text from the five-minute pre-raid and three-minute post-raid windows (up to 160 messages per window, 500 characters per message) to OpenAI for conversation analysis. Twitch chatter names, IDs, badges, and other identity fields are discarded before the request. THREADBOUND keeps raw chat in memory only and does not store it in SQLite. OpenAI processes the submitted text; turning consent off blocks future requests and cancels a pending request where possible, but cannot recall content already sent.</p>

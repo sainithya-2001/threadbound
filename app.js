@@ -130,16 +130,43 @@ function renderRaids(raids) {
     list.innerHTML = '<div class="live-empty"><span>⌁</span><div><strong>Listening for the next arrival</strong><small>New channel.raid events from Twitch will appear here.</small></div></div>';
     return;
   }
-  list.innerHTML = raids.map(raid => `<div class="live-raid-event"><div class="live-event-avatar">${escapeHtml((raid.fromBroadcasterName || '?').slice(0, 1).toUpperCase())}</div><div class="live-event-copy"><strong>${escapeHtml(raid.fromBroadcasterName || raid.fromBroadcasterLogin || 'Unknown channel')} <span>raided</span></strong><small>${escapeHtml(raid.viewers)} viewers → ${escapeHtml(raid.toBroadcasterName || raid.toBroadcasterLogin || 'your channel')}</small></div><time>${escapeHtml(formatTime(raid.receivedAt))}</time><span class="verified-event">✓ TWITCH EVENT</span></div>`).join('');
+  list.innerHTML = raids.map(raid => {
+    const synthetic = raid.synthetic === true;
+    return `<div class="live-raid-event"><div class="live-event-avatar">${escapeHtml((raid.fromBroadcasterName || '?').slice(0, 1).toUpperCase())}</div><div class="live-event-copy"><strong>${escapeHtml(raid.fromBroadcasterName || raid.fromBroadcasterLogin || 'Unknown channel')} <span>raided</span></strong><small>${escapeHtml(raid.viewers)} viewers → ${escapeHtml(raid.toBroadcasterName || raid.toBroadcasterLogin || 'your channel')}</small></div><time>${escapeHtml(formatTime(raid.receivedAt))}</time><span class="verified-event">${synthetic ? 'SYNTHETIC TEST' : '✓ TWITCH EVENT'}</span></div>`;
+  }).join('');
 }
 function renderConnection(state) {
-  renderAiConsent(state.aiConsent, state.demoMode === true);
+  renderAiConsent(state.aiConsent, state.demoMode === true, state.simulationMode === true);
   const connectionName = document.querySelector('#connection-name');
   const connectionDetail = document.querySelector('#connection-detail');
   const livePill = document.querySelector('#mode-pill');
   const connect = document.querySelector('#twitch-connect');
   const list = document.querySelector('#live-raid-list');
   const sampleBanner = document.querySelector('#sample-banner');
+  if (state.simulationMode === true) {
+    connectionName.textContent = 'Simulation workspace'; connectionDetail.textContent = 'No Twitch services connected';
+    document.querySelector('#profile-name').textContent = 'Synthetic broadcaster';
+    document.querySelector('#profile-detail').textContent = 'Fixture data only';
+    document.querySelector('#profile-avatar').textContent = 'ST';
+    document.querySelector('#connection-led').classList.remove('is-connected');
+    livePill.innerHTML = '<span></span> SIMULATION MODE';
+    connect.style.display = 'none';
+    list.hidden = false;
+    sampleBanner.hidden = false;
+    document.querySelector('#sample-banner-title').textContent = 'Synthetic test data · not from Twitch';
+    document.querySelector('#sample-banner-copy').textContent = 'This isolated test uses synthetic chat, a mocked raid event, and a mocked OpenAI response. No external service is contacted.';
+    document.querySelector('#sample-banner-tag').textContent = 'TEST ONLY';
+    document.querySelectorAll('.sample-only').forEach(el => { el.hidden = true; });
+    document.querySelectorAll('.sample-raid-only').forEach(el => { el.hidden = true; });
+    document.querySelector('#integration-health').hidden = true;
+    document.querySelector('#disconnect-button').hidden = true;
+    document.querySelector('#live-context-panel').hidden = false;
+    document.querySelector('.raid-panel .panel-heading h2').textContent = 'Synthetic raid arrivals';
+    document.querySelector('.raid-panel .panel-heading .data-tag').innerHTML = '<span class="data-dot"></span> SYNTHETIC EVENTS';
+    renderRaids(state.raids || []);
+    renderLiveContext(state.context || { status: 'idle', message: 'Waiting for synthetic test data.' }, true);
+    return;
+  }
   const live = Boolean(state.connected && state.broadcaster);
   const wasLive = liveConnected;
   liveConnected = live;
@@ -225,8 +252,8 @@ function renderConnection(state) {
   renderLiveContext(state.context || { status: 'idle', message: 'Waiting for a real Twitch raid.' });
 }
 
-function renderAiConsent(consent = {}, demoMode = aiConsentDemoLocked) {
-  aiConsentDemoLocked = demoMode === true;
+function renderAiConsent(consent = {}, demoMode = aiConsentDemoLocked, simulationMode = false) {
+  aiConsentDemoLocked = demoMode === true || simulationMode === true;
   if (aiConsentPending && !consent.optimistic) return;
   const enabled = typeof consent.enabled === 'boolean' ? consent.enabled : aiConsentEnabled;
   aiConsentEnabled = enabled;
@@ -236,17 +263,21 @@ function renderAiConsent(consent = {}, demoMode = aiConsentDemoLocked) {
   aiConsentToggle.setAttribute('aria-checked', String(enabled));
   panel.dataset.enabled = String(enabled);
   panel.dataset.error = 'false';
-  document.querySelector('#ai-consent-status').textContent = aiConsentDemoLocked
+  document.querySelector('#ai-consent-status').textContent = simulationMode
+    ? 'SIMULATION · MOCKED AI ONLY'
+    : aiConsentDemoLocked
     ? 'DEMO MODE · AI ANALYSIS DISABLED'
     : enabled ? 'ON · BOUNDED CHAT MAY BE SENT TO OPENAI' : 'OFF · NO CHAT SENT TO OPENAI';
-  document.querySelector('#ai-consent-detail').textContent = aiConsentDemoLocked
+  document.querySelector('#ai-consent-detail').textContent = simulationMode
+    ? 'Fixture responses are mocked in this isolated test. No chat or content is sent to OpenAI.'
+    : aiConsentDemoLocked
     ? 'This isolated preview cannot send chat or other content to OpenAI.'
     : enabled
     ? 'Only message text from the bounded windows is sent after a real raid. Turning this off blocks future requests.'
     : 'Twitch chat capture is independent. No chat content will be sent for AI analysis.';
 }
 
-function renderLiveContext(context) {
+function renderLiveContext(context, simulationMode = false) {
   const title = document.querySelector('#live-context-title');
   const stateTag = document.querySelector('#live-context-state');
   const message = document.querySelector('#live-context-message');
@@ -267,7 +298,10 @@ function renderLiveContext(context) {
   if (raidFacts) {
     const count = Number.isInteger(raidFacts.viewerCount) ? `${raidFacts.viewerCount.toLocaleString()} viewers` : 'viewer count unavailable';
     document.querySelector('#verified-raid-copy').textContent = `${raidFacts.sourceChannel} raided ${raidFacts.destinationChannel} · ${count}`;
-    document.querySelector('#verified-raid-time').textContent = `Received ${formatTime(raidFacts.receivedAt)} · verified Twitch EventSub metadata`;
+    document.querySelector('#verified-raid-facts label').textContent = raidFacts.synthetic === true ? 'SYNTHETIC TEST EVENT · NOT FROM TWITCH' : 'VERIFIED EVENT · TWITCH EVENTSUB';
+    document.querySelector('#verified-raid-time').textContent = raidFacts.synthetic === true
+      ? `Fixture time ${formatTime(raidFacts.receivedAt)} · no real Twitch event`
+      : `Received ${formatTime(raidFacts.receivedAt)} · verified Twitch EventSub metadata`;
   }
   draftWrap.hidden = !draft;
   if (!draft) {
@@ -288,6 +322,10 @@ function renderLiveContext(context) {
   liveCardCharCount.textContent = `${liveCardEdit.value.length} / 1000`;
   liveDraftSnapshot = draft;
   renderLiveClaims(draft);
+  document.querySelector('.context-ai-heading label').textContent = simulationMode ? 'MOCKED OPENAI RESPONSE · TEST ONLY' : 'AI-GENERATED CHAT SUMMARY';
+  document.querySelector('.context-ai-heading small').textContent = simulationMode
+    ? 'Built from synthetic fixture chat · no external OpenAI request'
+    : 'Based on bounded pre-raid and post-raid messages · review before use';
   liveCardEdit.disabled = Boolean(draft.approved);
   liveCardApprove.disabled = Boolean(draft.approved);
   liveCardApprove.innerHTML = draft.approved ? '<span>✓</span> Approved for OBS' : '<span>✓</span> Approve for OBS';
