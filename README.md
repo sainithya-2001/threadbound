@@ -82,7 +82,13 @@ The Playwright package is a development dependency. Installing Chromium is neede
 
 ### 2. Configure Twitch and OpenAI locally
 
-Copy .env.example to .env, then set the following values for the default local port:
+Create your local environment file:
+
+~~~powershell
+Copy-Item .env.example .env
+~~~
+
+Then set the following values in .env for the default local port:
 
 ~~~env
 HOST=127.0.0.1
