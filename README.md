@@ -213,8 +213,6 @@ Twitch OAuth and EventSub subscription checks were verified in prior live checks
 
 THREADBOUND is a working prototype. It implements Twitch integration, bounded conversation capture, evidence-checked context drafts, streamer approval, encrypted OAuth token storage, a separate sample demo, and a synthetic browser test. It does not claim to measure retention or know information Twitch does not expose.
 
-## Hackathon submission materials
 
-The official [Codex x TwitchCon Hackathon rules](https://twitchcon-codex.devpost.com/rules) specify a repository link, a project description that explains features and Codex usage, a Codex session ID, and a publicly visible YouTube demo video under three minutes showing the project functioning on Twitch and how it was built with Codex. The rules allow a private GitHub/GitLab repository when shared with the address listed on the rules page. Confirm access and submission fields in Devpost before submitting.
 
 **THREADBOUND — Keep the community connected.**
