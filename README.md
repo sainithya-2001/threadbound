@@ -190,9 +190,22 @@ node --test tests/simulation-browser.test.mjs
 
 The suite covers bounded chat capture, EventSub helpers, OAuth state and token refresh, encrypted token persistence, structured AI evidence validation, consent/error handling, demo isolation, simulation asset allowlisting, and the dashboard-to-OBS approval boundary. Playwright Chromium verifies the six generated dashboard fields, populated edit area, blank overlay before approval, approved-card rendering, dismissal, and payload privacy against synthetic data.
 
+The suite also includes an opt-in integration test against Twitch's official CLI mock EventSub WebSocket server. It connects THREADBOUND's production `EventSubWebSocketClient`, sends a CLI-generated synthetic `channel.raid` notification through the WebSocket, and exercises the production raid parser/handler, destination matching, duplicate rejection, pre-raid freeze, post-raid capture, and draft creation. The test injects a mock subscription API adapter and mocked OpenAI fetch; it makes no Twitch API or OpenAI request and does not create a real Twitch subscription.
+
+On Windows, install the official Twitch CLI using the [Twitch CLI instructions](https://dev.twitch.tv/docs/cli/) (Scoop is the documented package manager):
+
+~~~powershell
+scoop bucket add twitch https://github.com/twitchdev/scoop-bucket.git
+scoop install twitch-cli
+$env:THREADBOUND_TWITCH_CLI_EXE = (Get-Command twitch).Source
+npm test
+~~~
+
+The CLI integration test is skipped when `THREADBOUND_TWITCH_CLI_EXE` is unset. The recorded **CLI-enabled** full run completed with 61 passed, 0 failed, 0 skipped. The latest run in an environment without the CLI completed with 60 passed, 0 failed, and that one integration test skipped.
+
 The browser test does not use the current live server or manual simulation state. It does not make real OpenAI calls. It does not test an OBS Studio installation.
 
-**Latest verified test result: 58 passed, 0 failed, 0 skipped.** Update this number after any future test changes.
+**Suite size: 61 tests.** Recorded CLI-enabled result: 61 passed, 0 failed, 0 skipped. Latest CLI-unavailable result: 60 passed, 0 failed, 1 skipped. Update these results after future test changes.
 
 ## Verification limits and project status
 

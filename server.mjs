@@ -8,10 +8,12 @@ import { EncryptedTokenStore, TokenStoreError } from './token-store.mjs';
 import { InvalidRefreshTokenError, refreshOAuthTokens, tokenNeedsRefresh } from './oauth-refresh.mjs';
 import { RaidEventStore } from './raid-events.mjs';
 import { verifyOAuthState } from './oauth-state.mjs';
-import { assessRaidSubscription, buildRaidSubscriptionRequest, getEventSubSessionId } from './eventsub-utils.mjs';
+import { assessRaidSubscription, buildRaidSubscriptionRequest } from './eventsub-utils.mjs';
 import { assessChatMessageSubscription, buildChatMessageSubscriptionRequest, ChatContextWindows, hasChatReadPermission } from './chat-context.mjs';
 import { assessConversationReadiness, ConversationIntelligenceError, createRaidGenerationSchedule, generateConversationIntelligence } from './conversation-intelligence.mjs';
 import { ContextCardStore } from './context-cards.mjs';
+import { processChannelRaidNotification } from './eventsub-raid-handler.mjs';
+import { EventSubWebSocketClient } from './eventsub-websocket-client.mjs';
 
 // Test workers supply an explicit environment and must never read local secrets.
 if (process.env.NODE_ENV !== 'test') {
@@ -80,10 +82,10 @@ const DEMO_SAMPLE_DATA = Object.freeze({
 let twitch = null;
 let eventSocket = null;
 let eventGeneration = 0;
+let eventSubClient = null;
 let reconnectTimer = null;
 let sessionKeepaliveTimer = null;
 let tokenRefreshTimer = null;
-let resumeSubscriptions = false;
 let eventSubConnectionState = 'disconnected';
 let eventSubSessionId = null;
 let raidSubscriptionState = { status: 'not_created', enabled: false, broadcasterMatches: false, verifiedAt: null, error: null };
@@ -418,83 +420,100 @@ function armKeepalive(timeoutSeconds) {
 function connectEventSub(url = 'wss://eventsub.wss.twitch.tv/ws', resume = false) {
   if (DEMO_MODE) return;
   if (!twitch) return;
+  eventSubClient?.close();
   const generation = ++eventGeneration;
-  resumeSubscriptions = resume;
   status = 'connecting';
   eventSubConnectionState = 'connecting';
   if (!resume) eventSubSessionId = null;
-  let socket;
-  try { socket = new WebSocket(url); }
+  const client = new EventSubWebSocketClient({
+    WebSocketCtor: WebSocket,
+    subscriptionApi: {
+      onWelcome: async ({ sessionId, payload, resume: resumed }) => {
+        if (generation !== eventGeneration) return;
+        lastKeepalive = Date.now();
+        armKeepalive(payload.session?.keepalive_timeout_seconds || 10);
+        eventSubSessionId = sessionId;
+        eventSubConnectionState = payload.session?.status === 'connected' || payload.session?.status == null ? 'connected' : payload.session.status;
+        if (resumed) {
+          try { await verifyRaidSubscription(sessionId); }
+          catch (error) { console.error('EventSub subscription verification failed:', error.message); status = 'subscription_error'; raidSubscriptionState = { ...raidSubscriptionState, enabled: false, error: error.message }; }
+          await ensureChatSubscription(sessionId);
+          return;
+        }
+        try { await createRaidSubscription(sessionId); }
+        catch (error) {
+          console.error('EventSub subscription failed:', error.message);
+          status = 'subscription_error';
+          raidSubscriptionState = { ...raidSubscriptionState, status: 'error', enabled: false, error: error.message };
+        }
+        await ensureChatSubscription(sessionId);
+      }
+    },
+    handlers: {
+      onSocket: socket => { if (generation === eventGeneration) eventSocket = socket; },
+      onWelcome: ({ sessionId, payload }) => {
+        if (generation === eventGeneration && !sessionId) {
+          eventSubConnectionState = 'error';
+          status = 'subscription_error';
+          console.error('EventSub Welcome message did not include a session ID.');
+        }
+      },
+      onKeepalive: ({ payload }) => {
+        if (generation !== eventGeneration) return;
+        lastKeepalive = Date.now();
+        armKeepalive(payload.session?.keepalive_timeout_seconds || 10);
+        eventSubConnectionState = 'connected';
+      },
+      onNotification: ({ envelope, payload }) => {
+        if (generation !== eventGeneration) return;
+        if (payload.subscription?.type === 'channel.raid') {
+          processChannelRaidNotification({
+            envelope,
+            broadcasterId: twitch?.user.id,
+            raidEvents,
+            chatWindows,
+            onAcceptedRaid: beginContextContinuity
+          });
+        } else if (payload.subscription?.type === 'channel.chat.message') {
+          if (chatSubscriptionState.enabled && payload.event?.broadcaster_user_id === twitch?.user.id) {
+            chatWindows.add(payload.event, payload.event?.message_id || envelope.metadata?.message_id);
+          }
+        }
+      },
+      onReconnect: () => {
+        if (generation !== eventGeneration) return;
+        clearKeepalive();
+        eventSubConnectionState = 'reconnecting';
+      },
+      onRevocation: ({ payload }) => {
+        if (generation !== eventGeneration) return;
+        console.warn('EventSub subscription was revoked.');
+        if (payload.subscription?.type === 'channel.chat.message') {
+          chatSubscriptionState = { ...chatSubscriptionState, status: payload.subscription?.status || 'revoked', enabled: false, error: 'Twitch revoked the chat subscription.' };
+        } else {
+          status = 'subscription_error';
+          raidSubscriptionState = { ...raidSubscriptionState, status: payload.subscription?.status || 'revoked', enabled: false, error: 'Twitch revoked the EventSub subscription.' };
+        }
+      },
+      onClose: () => {
+        if (generation !== eventGeneration) return;
+        clearKeepalive();
+        eventSubConnectionState = twitch ? 'reconnecting' : 'disconnected';
+        if (twitch) {
+          status = 'reconnecting';
+          raidSubscriptionState = { ...raidSubscriptionState, status: 'reconnecting', enabled: false, error: 'WebSocket closed; waiting for a new session.' };
+          if (hasChatReadPermission(twitch?.scopes)) chatSubscriptionState = { ...chatSubscriptionState, status: 'reconnecting', enabled: false, error: null };
+          scheduleReconnect();
+        }
+      },
+      onError: () => {
+        if (generation === eventGeneration && twitch) { status = 'reconnecting'; eventSubConnectionState = 'reconnecting'; }
+      }
+    }
+  });
+  eventSubClient = client;
+  try { eventSocket = client.connect(url, { resume }); }
   catch { status = 'reconnecting'; scheduleReconnect(); return; }
-  eventSocket = socket;
-  socket.addEventListener('message', async message => {
-    if (generation !== eventGeneration) return;
-    let envelope;
-    try { envelope = JSON.parse(message.data); } catch { return; }
-    const type = envelope.metadata?.message_type;
-    const payload = envelope.payload || {};
-    if (type === 'session_welcome') {
-      lastKeepalive = Date.now();
-      armKeepalive(payload.session?.keepalive_timeout_seconds || 10);
-      eventSubSessionId = getEventSubSessionId(payload);
-      eventSubConnectionState = payload.session?.status === 'connected' || payload.session?.status == null ? 'connected' : payload.session.status;
-      if (resumeSubscriptions) {
-        resumeSubscriptions = false;
-        try { await verifyRaidSubscription(eventSubSessionId); }
-        catch (error) { console.error('EventSub subscription verification failed:', error.message); status = 'subscription_error'; raidSubscriptionState = { ...raidSubscriptionState, enabled: false, error: error.message }; }
-        await ensureChatSubscription(eventSubSessionId);
-        return;
-      }
-      try { await createRaidSubscription(eventSubSessionId); }
-      catch (error) {
-        console.error('EventSub subscription failed:', error.message);
-        status = 'subscription_error';
-        raidSubscriptionState = { ...raidSubscriptionState, status: 'error', enabled: false, error: error.message };
-      }
-      await ensureChatSubscription(eventSubSessionId);
-    } else if (type === 'session_keepalive') {
-      lastKeepalive = Date.now();
-      armKeepalive(payload.session?.keepalive_timeout_seconds || 10);
-      eventSubConnectionState = 'connected';
-    } else if (type === 'notification' && payload.subscription?.type === 'channel.raid') {
-      const eventId = envelope.metadata?.message_id || randomBytes(12).toString('hex');
-      const event = payload.event || {};
-      const receivedAt = Date.now();
-      if (raidEvents.add(event, eventId) && event.to_broadcaster_user_id === twitch?.user.id && chatWindows.beginRaid(eventId, receivedAt)) {
-        beginContextContinuity(eventId, event, receivedAt);
-      }
-    } else if (type === 'notification' && payload.subscription?.type === 'channel.chat.message') {
-      if (chatSubscriptionState.enabled && payload.event?.broadcaster_user_id === twitch?.user.id) {
-        chatWindows.add(payload.event, payload.event?.message_id || envelope.metadata?.message_id);
-      }
-    } else if (type === 'session_reconnect' && payload.session?.reconnect_url) {
-      clearKeepalive();
-      eventSubConnectionState = 'reconnecting';
-      connectEventSub(payload.session.reconnect_url, true);
-    } else if (type === 'revocation') {
-      console.warn('EventSub subscription was revoked.');
-      if (payload.subscription?.type === 'channel.chat.message') {
-        chatSubscriptionState = { ...chatSubscriptionState, status: payload.subscription?.status || 'revoked', enabled: false, error: 'Twitch revoked the chat subscription.' };
-      } else {
-        status = 'subscription_error';
-        raidSubscriptionState = { ...raidSubscriptionState, status: payload.subscription?.status || 'revoked', enabled: false, error: 'Twitch revoked the EventSub subscription.' };
-      }
-    }
-  });
-  socket.addEventListener('close', () => {
-    if (generation !== eventGeneration) return;
-    clearKeepalive();
-    eventSubConnectionState = twitch ? 'reconnecting' : 'disconnected';
-    if (twitch) {
-      status = 'reconnecting';
-      raidSubscriptionState = { ...raidSubscriptionState, status: 'reconnecting', enabled: false, error: 'WebSocket closed; waiting for a new session.' };
-      if (hasChatReadPermission(twitch?.scopes)) chatSubscriptionState = { ...chatSubscriptionState, status: 'reconnecting', enabled: false, error: null };
-      scheduleReconnect();
-    }
-  });
-  socket.addEventListener('error', () => {
-    if (generation === eventGeneration && twitch) { status = 'reconnecting'; eventSubConnectionState = 'reconnecting'; }
-  });
 }
 function disconnect({ clearPersisted = false } = {}) {
   clearContextWork();
@@ -505,7 +524,8 @@ function disconnect({ clearPersisted = false } = {}) {
   raidSubscriptionState = { status: 'not_created', enabled: false, broadcasterMatches: false, verifiedAt: null, error: null };
   eventGeneration++;
   clearTimeout(reconnectTimer); clearKeepalive(); clearTimeout(tokenRefreshTimer);
-  if (eventSocket && eventSocket.readyState < WebSocket.CLOSING) eventSocket.close();
+  eventSubClient?.close();
+  eventSubClient = null;
   eventSocket = null;
   raidEvents.clear();
   chatWindows.clear();
