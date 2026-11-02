@@ -110,7 +110,13 @@ npm install
 
 ### 2. Configure environment variables
 
-Copy `.env.example` to `.env` and configure:
+Create your local environment file:
+
+```powershell
+Copy-Item .env.example .env
+```
+
+Then configure the values in `.env`:
 
 ```env
 PORT=4173
