@@ -1,38 +1,208 @@
 # THREADBOUND
+### Keep the community connected.
 
-Local Twitch raid arrival experience. THREADBOUND connects broadcaster OAuth, EventSub `channel.raid`, bounded in-memory chat context, and conversation continuity drafts that stay private until the streamer approves them.
+**THREADBOUND helps Twitch communities preserve conversation context when new viewers arrive through raids.**
 
-## Twitch setup
+A raid can bring an entirely new audience into a stream, but newcomers often arrive in the middle of a conversation. They may not know what the community is discussing, what just happened, or how to participate.
 
-1. Register an application in the [Twitch Developer Console](https://dev.twitch.tv/console/apps).
-2. Set its OAuth redirect URL to exactly `http://localhost:4173/auth/twitch/callback`.
-3. Copy `.env.example` to `.env` and fill in `TWITCH_CLIENT_ID`, `TWITCH_CLIENT_SECRET`, a private 32-byte `THREADBOUND_ENCRYPTION_KEY`, and `OPENAI_API_KEY`. Keep `.env` private; it is gitignored. The encryption key protects OAuth tokens stored in `data/threadbound.sqlite`; the OpenAI key is only used on the server.
-4. Run `npm start`, then open `http://localhost:4173/` and connect the broadcaster account. Approve the requested `user:read:chat` permission to enable bounded chat context.
+THREADBOUND bridges that context gap.
 
-Use one hostname for the entire sign-in attempt. `APP_BASE_URL` is the canonical browser origin; if the dashboard is opened as `127.0.0.1`, the sign-in route redirects to the canonical `localhost` origin before creating its state cookie. For a different hostname, update `APP_BASE_URL`, `TWITCH_REDIRECT_URI`, and the Twitch app's registered redirect URL to match exactly. Local HTTP intentionally omits the `Secure` cookie attribute; HTTPS deployments add it automatically. `HttpOnly`, `SameSite=Lax`, a ten-minute expiry, and the one-time state match remain enabled in development.
+It captures a bounded window of conversation before and after a raid, identifies what continued or changed, and creates an evidence-grounded context card for the streamer to review. Nothing reaches the public OBS overlay until the streamer approves it.
 
-The `channel.raid` EventSub subscription listens for raids arriving at the connected broadcaster. Twitch requires a user access token for WebSocket subscriptions; this subscription type has no additional OAuth scope requirement. The `channel.chat.message` subscription uses the broadcaster-authorized `user:read:chat` scope. Reauthorize an existing connection once to grant that scope. The app collects message text into five-minute pre-raid and three-minute post-raid windows, capped at 160 messages and 500 characters per message. Chatter identities are discarded; raw message text is held in memory only and is never written to SQLite or returned by public endpoints.
+---
 
-AI analysis consent is off by default and is held in server memory. The dashboard explains that bounded chat message text is sent to OpenAI when consent is enabled; chatter names, IDs, badges, and other identity fields are discarded, and THREADBOUND does not persist raw chat. Twitch chat capture and raid detection remain independent of this setting. Turning consent off blocks future requests and aborts a pending request where possible; content already transmitted cannot be recalled. A raid missed while consent is off is not submitted retroactively.
+## The problem
 
-After a real raid, THREADBOUND checks at 15 seconds and generates then only if at least eight unique post-raid messages arrived. Otherwise, it generates once at 45 seconds. At least three messages in each window are required; sparse or ambiguous context stays an honest insufficient-context state. The conversation engine sends separate pre-raid and post-raid windows to the OpenAI Responses API with strict structured JSON output, `store: false`, no tools, and a 12-second timeout only after opt-in. `OPENAI_MODEL` is configurable and defaults to `gpt-6-luna`. Evidence references and exact quotes are validated server-side; one invalid reference rejects the whole draft. Evidence quotes and viewer identities are never returned to the dashboard or OBS. Generation runs asynchronously so Twitch event handling and dashboard polling remain responsive.
+Twitch raids bring communities together, but conversation doesn't automatically transfer with them.
 
-Live AI cards appear as private dashboard drafts. The streamer can edit, approve, or dismiss them. The OBS browser source uses a server-side approved-card endpoint and remains blank unless the current live card has been approved. Verified Twitch raid facts appear in a separate visual section from AI-generated chat claims. No verified live stream title or game metadata is currently available through this app, so THREADBOUND does not invent it. The local sample workspace remains available when Twitch is disconnected.
+New arrivals can miss:
+- The topic everyone was discussing.
+- The context behind an ongoing conversation.
+- A change in direction after the raid.
+- An easy way to join the discussion naturally.
 
-OAuth access and refresh tokens are encrypted at rest in SQLite and never returned to the browser. Keep `THREADBOUND_ENCRYPTION_KEY` private and backed up; losing it makes the stored session unreadable. Restarting the local server restores the broadcaster session and re-establishes EventSub.
+Generic welcome messages acknowledge arrivals, but they don't explain what the community is actually talking about.
 
-For an isolated preview, start a separate process with `DEMO_MODE=true` and a preview port such as `4175`. Explicit demo mode takes precedence over credentials loaded from `.env`: the server does not initialize OAuth or the token database, open EventSub, collect chat, or call OpenAI. The consent endpoint rejects attempts to enable AI. The status endpoint reports `demoMode: true` and exposes any sample content under a separately labeled `sampleData` field. Invalid `DEMO_MODE` values fail startup instead of selecting a mode silently.
+## The solution
 
-To use a different port, update `PORT` in `.env` and register the matching callback URL using `TWITCH_REDIRECT_URI`, for example `http://localhost:4180/auth/twitch/callback`.
+THREADBOUND turns raid arrival into a conversation-continuity experience.
 
-## Run and verify
+**Capture → Understand → Review → Approve → Display**
+
+1. **Capture:** Maintain a bounded, temporary chat context before and after a real Twitch raid.
+2. **Understand:** Analyze the two conversation windows separately and identify continuity, changes, and missed context.
+3. **Review:** Generate a structured context card with evidence-grounded claims.
+4. **Approve:** Let the streamer edit, approve, or dismiss the proposed card.
+5. **Display:** Publish only the approved card to the OBS browser source.
+
+If the conversation doesn't contain enough evidence, THREADBOUND reports insufficient context rather than inventing an explanation.
+
+---
+
+## What makes THREADBOUND different?
+
+THREADBOUND isn't another generic welcome bot or stream analytics dashboard.
+
+Its central purpose is **conversation continuity across community arrivals**.
+
+- Context comes from actual bounded conversation windows.
+- Pre-raid and post-raid discussion are analyzed separately.
+- Claims must pass server-side evidence-reference and exact-quote validation.
+- The streamer retains editorial control.
+- OBS receives approved content only.
+- Insufficient context is treated as a valid outcome.
+
+## Features
+
+- Twitch broadcaster OAuth.
+- Twitch EventSub raid detection.
+- Twitch chat message subscription.
+- Five-minute pre-raid and three-minute post-raid context windows.
+- Bounded in-memory message capture.
+- Conversation continuity analysis through the OpenAI Responses API.
+- Structured, evidence-validated context drafts.
+- Streamer editing, approval, and dismissal.
+- Separate dashboard and OBS browser source.
+- Isolated sample-data demo mode.
+- Encrypted OAuth token storage.
+
+## Privacy and safety
+
+Privacy is a core design requirement.
+
+- AI analysis consent is OFF by default.
+- Bounded chat text is sent to OpenAI only after explicit consent.
+- Chatter names, IDs, badges, and other identity fields are discarded from captured context.
+- Raw chat is held in memory only and is not persisted to SQLite.
+- AI requests use `store: false`, without tools or conversation state.
+- Turning consent off blocks future requests and aborts pending requests where possible.
+- Content already transmitted cannot be recalled.
+- AI-generated drafts remain private until streamer approval.
+- OBS never receives an unapproved draft.
+- Chat content is treated as untrusted input.
+
+THREADBOUND does not claim to measure silent viewer retention or infer individual viewer behavior.
+
+## Technology
+
+- **Runtime:** Node.js
+- **Backend:** Native Node.js HTTP server
+- **Frontend:** HTML, CSS, and JavaScript
+- **Platform integration:** Twitch OAuth and EventSub WebSockets
+- **Conversation intelligence:** OpenAI Responses API
+- **OAuth token storage:** SQLite, encrypted at rest
+- **Token security:** AES-256-GCM encryption
+- **Streaming integration:** OBS browser source
+- **Testing:** Node.js built-in test runner
+
+## Run locally
+
+Requirements:
+- Node.js 24 or compatible modern Node.js runtime.
+- A Twitch Developer application for live integration.
+- An OpenAI API key for AI analysis.
+
+### 1. Install dependencies
+
+```powershell
+npm install
+```
+
+### 2. Configure environment variables
+
+Copy `.env.example` to `.env` and configure:
+
+```env
+PORT=4173
+APP_BASE_URL=http://localhost:4173
+TWITCH_REDIRECT_URI=http://localhost:4173/auth/twitch/callback
+
+TWITCH_CLIENT_ID=your_twitch_client_id
+TWITCH_CLIENT_SECRET=your_twitch_client_secret
+
+THREADBOUND_ENCRYPTION_KEY=replace_with_32_byte_base64url_key
+
+OPENAI_API_KEY=your_openai_api_key
+OPENAI_MODEL=gpt-6-luna
+```
+
+Set `THREADBOUND_ENCRYPTION_KEY` to a randomly generated 32-byte key encoded as base64url (or 64 hexadecimal characters). Keep `.env` private. It is excluded from Git.
+
+Register the exact redirect URL in the Twitch Developer Console:
+
+`http://localhost:4173/auth/twitch/callback`
+
+### 3. Start THREADBOUND
 
 ```powershell
 npm start
+```
+
+Open the dashboard:
+
+`http://localhost:4173/`
+
+Connect the broadcaster account and authorize the requested chat permission.
+
+### 4. Open the OBS browser source
+
+`http://localhost:4173/overlay.html`
+
+The overlay remains blank until the streamer approves a context card.
+
+## Isolated demo mode
+
+THREADBOUND includes an isolated demo mode that uses clearly labelled illustrative sample content.
+
+Start a separate demo instance:
+
+```powershell
+$env:PORT = "4175"
+$env:DEMO_MODE = "true"
+node server.mjs
+```
+
+Open:
+
+- Dashboard: `http://localhost:4175/`
+- OBS overlay: `http://localhost:4175/overlay.html`
+
+Demo mode overrides credentials loaded from `.env`. It does not initialize Twitch OAuth or token storage, connect EventSub, collect chat, or make OpenAI requests. AI consent cannot be enabled in this mode.
+
+Sample content is illustrative and is never presented as a real Twitch raid.
+
+## Testing
+
+Run the automated test suite:
+
+```powershell
 npm test
 ```
 
-Dashboard: `http://localhost:4173/`  
-OBS browser source: `http://localhost:4173/overlay.html`
+The test suite covers:
 
-Live raid details come from Twitch EventSub. The dashboard indicates whether bounded chat collection is authorized and active. Sample conversation content is labeled and excluded from live context. API failures, missing chat permission, and insufficient conversation context have separate dashboard states.
+- Bounded chat capture and expiration.
+- Raid and message deduplication.
+- Twitch EventSub session handling.
+- OAuth state validation and token refresh.
+- Encrypted token persistence.
+- Evidence validation and prompt-injection handling.
+- AI consent and failure handling.
+- Streamer approval and OBS publishing boundaries.
+- Demo-mode isolation.
+
+**Latest verified result: 43 tests passed, 0 failed.**
+
+## Project status
+
+THREADBOUND is a working prototype with implemented Twitch integration, bounded conversation capture, conversation intelligence, privacy safeguards, and an isolated demo experience.
+
+Twitch OAuth and the `channel.raid` and `channel.chat.message` subscription checks have succeeded in prior integration verification. Full end-to-end validation of a real raid through AI generation and OBS publication remains a testing goal.
+
+## Vision
+
+We believe a raid should be more than an audience transfer.
+
+It should be a moment when communities can connect without losing the conversation that brought them together.
+
+**THREADBOUND — Keep the community connected.**
